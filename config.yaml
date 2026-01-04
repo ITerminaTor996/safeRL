@@ -1,0 +1,66 @@
+# Safe RL Drone 配置文件 v2.0
+# ============================================================
+
+# 环境设置
+environment:
+  map_path: "maps/map1.txt"
+  render: false          # 是否渲染画面（WSL下建议关闭）
+  view_size: 5           # 局部视野大小 (奇数，如 3, 5, 7)
+
+# 原子命题定义
+# - "auto": 环境自动提供
+# - type: "position": 指定坐标位置
+# - type: "region": 指定区域
+atomic_propositions:
+  # 环境自动提供的命题
+  wall: "auto"
+  goal: "auto"
+  boundary: "auto"
+  empty: "auto"
+  
+  # 用户自定义命题示例（取消注释使用）
+  # checkpoint1:
+  #   type: "position"
+  #   pos: [2, 3]
+  # danger_zone:
+  #   type: "region"
+  #   positions: [[1, 1], [1, 2], [2, 1]]
+  #   avoid: true
+
+# 安全设置（形式化保证，硬约束）
+safety:
+  enabled: true
+  formula: "G(!wall) & G(!boundary)"   # LTL 安全公式
+  # 支持的算子: G(全局), F(最终), X(下一步), U(直到), &(与), |(或), !(非), ->(蕴含)
+  # 示例:
+  #   "G(!wall)": 永远不撞墙
+  #   "G(!wall) & G(!boundary)": 永远不撞墙且不越界
+  #   "G(!danger_zone)": 永远避开危险区
+  unsafe_penalty: -1.0       # 尝试不安全动作的惩罚
+
+# 任务设置（RL 学习，软目标）
+task:
+  type: "reach_goal"         # 任务类型
+  use_robustness_reward: true  # 是否使用 robustness 作为奖励塑形
+  robustness_weight: 0.1     # robustness 奖励权重
+  goal_reward: 10.0          # 到达目标奖励
+  step_penalty: -0.1         # 每步惩罚
+
+# 训练设置
+training:
+  enabled: true              # 是否进行训练
+  algorithm: "PPO"           # 强化学习算法
+  total_timesteps: 20000     # 训练总步数
+  device: "cpu"              # 训练设备: cpu 或 cuda
+  verbose: 1                 # 日志详细程度
+
+# 测试设置
+testing:
+  episodes: 3                # 测试回合数
+  deterministic: true        # 是否使用确定性策略
+
+# 模型设置
+model:
+  save_path: "models/"       # 模型保存路径
+  auto_save: true            # 训练后自动保存
+  load_path: ""               # 加载已有模型路径（留空则创建新模型）
