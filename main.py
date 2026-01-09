@@ -12,6 +12,7 @@ import time
 import yaml
 import argparse
 import numpy as np
+from gymnasium.wrappers import TimeLimit
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -80,11 +81,19 @@ def print_banner(config: dict):
     """打印启动信息"""
     print(f"\n{'='*60}")
     print("Safe RL Drone - 形式化方法 + 强化学习")
+    print("Goal-Conditioned RL: Reach Skill with Safety Guarantee")
     print(f"{'='*60}")
     print(f"地图: {config['environment']['map_path']}")
     print(f"安全保护: {'✓ 开启' if config['safety']['enabled'] else '✗ 关闭'}")
     if config['safety']['enabled']:
         print(f"LTL 安全公式: {config['safety']['formula']}")
+    print(f"随机目标: {'✓' if config['environment'].get('random_goal', False) else '✗'}")
+    print(f"随机起点: {'✓' if config['environment'].get('random_start', False) else '✗'}")
+    dynamic = config['environment'].get('dynamic_obstacles', False)
+    print(f"动态障碍物: {'✓ 开启' if dynamic else '✗ 关闭'}")
+    if dynamic:
+        prob = config['environment'].get('obstacle_change_prob', 0.02)
+        print(f"  变化概率: {prob}")
     print(f"Robustness 奖励: {'✓' if config['task'].get('use_robustness_reward', False) else '✗'}")
     print(f"训练: {'✓ 启用' if config['training']['enabled'] else '✗ 跳过'}")
     print(f"{'='*60}\n")
@@ -126,7 +135,23 @@ def main():
     # ==============================================================
     print("--> Step 2: Creating environment...")
     view_size = config['environment'].get('view_size', 5)
-    base_env = GridWorldEnv(grid_map=grid_map, view_size=view_size)
+    random_goal = config['environment'].get('random_goal', False)
+    random_start = config['environment'].get('random_start', False)
+    dynamic_obstacles = config['environment'].get('dynamic_obstacles', False)
+    obstacle_change_prob = config['environment'].get('obstacle_change_prob', 0.02)
+    
+    base_env = GridWorldEnv(
+        grid_map=grid_map, 
+        view_size=view_size,
+        random_goal=random_goal,
+        random_start=random_start,
+        dynamic_obstacles=dynamic_obstacles,
+        obstacle_change_prob=obstacle_change_prob
+    )
+    
+    print(f"  可用目标位置数: {len(base_env.empty_cells)}")
+    if dynamic_obstacles:
+        print(f"  动态障碍物: ✓ 开启 (变化概率: {obstacle_change_prob})")
     
     if config['safety']['enabled']:
         # 使用新的安全包装器
@@ -140,6 +165,11 @@ def main():
         )
     else:
         env = base_env
+    
+    # 添加训练时的超时限制
+    max_episode_steps = config['environment'].get('max_episode_steps', 500)
+    env = TimeLimit(env, max_episode_steps=max_episode_steps)
+    print(f"  每回合最大步数: {max_episode_steps}")
     
     # ==============================================================
     # 3. 加载或创建智能体
@@ -198,18 +228,34 @@ def main():
         print("--> Step 4: Skipping training...")
     
     # ==============================================================
-    # 5. 测试
+    # 5. 测试（验证目标泛化性）
     # ==============================================================
     print(f"\n--> Step 5: Testing for {config['testing']['episodes']} episodes...")
+    print("  验证目标泛化性：测试时使用随机目标")
     
     test_interventions = 0
     test_collisions = 0
     test_boundary = 0
     total_robustness = 0.0
-    max_steps = 500
+    max_steps = config['environment'].get('max_episode_steps', 500)
+    successes = 0
+    
+    # 获取测试目标列表
+    test_goals = config['testing'].get('test_goals', [])
     
     for episode in range(config['testing']['episodes']):
-        obs, info = env.reset()
+        # 设置测试目标
+        if test_goals and episode < len(test_goals):
+            goal = tuple(test_goals[episode])
+            obs, info = env.reset(options={'goal': goal})
+        else:
+            # 随机目标
+            obs, info = env.reset()
+            goal = info.get('goal', None)
+        
+        start = info.get('start', None)
+        print(f"\n  Episode {episode + 1}: 起点={start}, 目标={goal}")
+        
         terminated = False
         truncated = False
         steps = 0
@@ -236,12 +282,20 @@ def main():
         avg_rho = np.mean(episode_robustness) if episode_robustness else 0.0
         total_robustness += avg_rho
         
-        status = "✓ 到达目标" if terminated else "✗ 超时"
-        print(f"  Episode {episode + 1}: {steps} steps, avg ρ={avg_rho:.2f} ({status})")
+        if terminated:
+            successes += 1
+            status = "✓ 到达目标"
+        else:
+            status = "✗ 超时"
+        
+        print(f"    结果: {steps} 步, avg ρ={avg_rho:.2f} ({status})")
+    
+    success_rate = successes / config['testing']['episodes'] * 100
     
     print(f"\n{'='*60}")
-    print("测试结果")
+    print("测试结果（目标泛化性验证）")
     print(f"{'='*60}")
+    print(f"成功率: {successes}/{config['testing']['episodes']} ({success_rate:.1f}%)")
     if config['safety']['enabled']:
         print(f"安全干预次数: {test_interventions}")
     print(f"撞墙次数: {test_collisions}")

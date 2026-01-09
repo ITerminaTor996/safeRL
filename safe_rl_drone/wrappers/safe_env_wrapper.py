@@ -78,12 +78,15 @@ class SafeEnvWrapper(gym.Wrapper):
         print(f"[SafeEnvWrapper] Robustness 奖励: {use_robustness_reward}")
     
     def reset(self, **kwargs) -> Tuple[np.ndarray, Dict]:
-        """重置环境"""
+        """重置环境，支持 Goal-Conditioned RL"""
         obs, info = self.env.reset(**kwargs)
         
         # 重置监控器和过滤器
         self.safety_monitor.reset()
         self.action_filter.reset()
+        
+        # 更新环境信息（目标可能已改变）
+        self.env_info = self.unwrapped.get_env_info()
         
         # 重置统计
         self.episode_stats = {

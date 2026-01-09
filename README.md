@@ -1,19 +1,35 @@
 # Safe RL Drone
 
-基于形式化方法的安全强化学习项目。使用 LTL (Linear Temporal Logic) 提供安全保证，确保智能体在训练和测试过程中不违反安全约束。
+基于形式化方法的安全强化学习项目。使用 LTL (Linear Temporal Logic) 提供安全保证，结合 Goal-Conditioned RL 实现目标泛化。
 
-## 核心思想
+## 核心设计
 
-- **Safety（安全）**: 用形式化方法保证，作为硬约束
-- **Task（任务）**: 交给 RL 学习，作为软目标
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Architecture                              │
+├─────────────────────────────────────────────────────────────┤
+│  Safety Layer (形式化保证，硬约束)                            │
+│  ├── LTL 公式: G(!wall) & G(!boundary)                       │
+│  ├── 动作过滤: 不安全动作 → 原地不动                          │
+│  └── 零违规保证: 训练和测试全程安全                           │
+├─────────────────────────────────────────────────────────────┤
+│  Goal-Conditioned Policy (RL 学习，软目标)                   │
+│  ├── 观测: 局部视野 (5×5) + 目标方向 (2)                     │
+│  ├── 能力: Reach(goal) - 安全到达任意目标                    │
+│  └── 泛化: 换目标不用重新训练                                │
+└─────────────────────────────────────────────────────────────┘
+```
 
-这种设计既保证了安全性，又不伤害 RL 的泛化性能。
+核心原则：
+- **Safety ≠ Reward** - 安全不进 RL 的 reward，用形式化方法硬保证
+- **Goal = Parameter** - 目标是策略的参数，不是固定的
+- **Policy reused across goals** - 一个策略，任意目标
 
 ## 项目结构
 
 ```
 safe_rl_drone/
-├── env.py                 # GridWorld 环境
+├── env.py                 # GridWorld 环境 (支持 random_goal/random_start)
 ├── ltl/                   # LTL 形式化方法模块
 │   ├── propositions.py    # 原子命题管理
 │   ├── parser.py          # LTL 公式解析（使用 Spot）
@@ -24,22 +40,30 @@ safe_rl_drone/
 │   └── action_filter.py   # 动作过滤器
 └── wrappers/              # 环境包装器
     └── safe_env_wrapper.py
+
 tests/                     # 测试文件
+├── test_ltl_modules.py    # LTL 模块测试
+├── test_safe_wrapper.py   # 安全包装器测试
+└── test_goal_conditioned.py # Goal-Conditioned 测试
+
 maps/                      # 地图文件
+├── map1.txt               # 6×6 简单地图
+├── map2_medium.txt        # 10×10 中等地图
+└── map3_maze.txt          # 迷宫地图
+
 models/                    # 训练好的模型
+└── ppo_safe.zip           # Goal-Conditioned 安全策略
 ```
 
 ## 安装
 
-### 依赖
+### Python 依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
 ### Spot 库（LTL 解析）
-
-Spot 需要从源码编译安装：
 
 ```bash
 # Ubuntu/WSL
@@ -52,92 +76,89 @@ make
 sudo make install
 ```
 
-## 使用方法
-
-### 基本运行
+## 快速开始
 
 ```bash
 # 设置环境变量（WSL）
 export PYTHONPATH=/usr/local/lib/python3.12/site-packages:$PYTHONPATH
-export DISPLAY=:0
 
-# 运行（使用默认配置）
+# 训练 + 测试
 python3 main.py
+
+# 跳过训练，直接测试已有模型
+python3 main.py --skip-train --load models/ppo_safe
 ```
 
-### 命令行参数
+## 配置说明
 
-```bash
-# 开启/关闭安全层
-python3 main.py --safe true
-python3 main.py --safe false
-
-# 指定 LTL 公式
-python3 main.py --ltl "G(!wall) & G(!boundary)"
-
-# 跳过训练，直接测试
-python3 main.py --skip-train
-
-# 加载已有模型
-python3 main.py --load models/ppo_safe
-```
-
-### 配置文件
-
-编辑 `config.yaml` 进行详细配置：
+编辑 `config.yaml`：
 
 ```yaml
+environment:
+  map_path: "maps/map2_medium.txt"
+  view_size: 5           # 局部视野大小
+  random_goal: true      # 训练时随机目标
+  random_start: true     # 训练时随机起点
+
 safety:
   enabled: true
-  formula: "G(!wall)"      # LTL 安全公式
-  unsafe_penalty: -1.0
+  formula: "G(!wall) & G(!boundary)"  # LTL 安全公式
 
-task:
-  use_robustness_reward: true
-  robustness_weight: 0.1
+training:
+  total_timesteps: 100000
 ```
-
-## LTL 公式语法
-
-支持的算子：
-- `G(φ)` - 全局（Always）：φ 在所有时刻都成立
-- `F(φ)` - 最终（Eventually）：φ 在某个时刻成立
-- `X(φ)` - 下一步（Next）：φ 在下一时刻成立
-- `φ U ψ` - 直到（Until）：φ 成立直到 ψ 成立
-- `!φ` - 非（Not）
-- `φ & ψ` - 与（And）
-- `φ | ψ` - 或（Or）
-
-示例公式：
-- `G(!wall)` - 永远不撞墙
-- `G(!wall) & G(!boundary)` - 永远不撞墙且不越界
-- `G(!wall) & F(goal)` - 安全地到达目标
 
 ## 实验结果
 
-在相同配置下训练 20000 步的对比：
+在 10×10 地图上训练 100000 步：
 
-| 指标 | 安全版本 | 不安全版本 |
-|------|---------|-----------|
-| 训练撞墙次数 | 0 | 6029 |
-| 安全干预次数 | 6768 | 0 |
-| 最终性能 | 到达目标 | 到达目标 |
+| 指标 | 结果 |
+|------|------|
+| 训练撞墙次数 | 0 |
+| 训练越界次数 | 0 |
+| 安全干预率 | 4.62% |
+| 测试成功率 | 100% (5/5) |
+| 测试安全违规 | 0 |
 
-安全层在训练过程中提供了零撞墙保证。
+验证了两个核心能力：
+1. **目标泛化** - 随机起点/目标都能到达
+2. **安全保证** - 全程零违规
+
+## LTL 公式语法
+
+| 算子 | 含义 | 示例 |
+|------|------|------|
+| `G(φ)` | 全局 (Always) | `G(!wall)` 永不撞墙 |
+| `F(φ)` | 最终 (Eventually) | `F(goal)` 最终到达目标 |
+| `X(φ)` | 下一步 (Next) | `X(safe)` 下一步安全 |
+| `φ U ψ` | 直到 (Until) | `safe U goal` |
+| `!`, `&`, `\|` | 非、与、或 | `!wall & !boundary` |
+
+## 命令行参数
+
+```bash
+python3 main.py --safe true/false    # 开启/关闭安全层
+python3 main.py --ltl "G(!wall)"     # 指定 LTL 公式
+python3 main.py --timesteps 50000    # 训练步数
+python3 main.py --skip-train         # 跳过训练
+python3 main.py --load models/xxx    # 加载模型
+```
 
 ## 运行测试
 
 ```bash
-# LTL 模块测试
-python3 tests/test_ltl_modules.py
-
-# 安全包装器测试
-python3 tests/test_safe_wrapper.py
+python3 -m pytest tests/ -v
 ```
+
+## 后续计划
+
+- [ ] Task FSA 集成 - 支持顺序任务 (F(A) & F(B) & ...)
+- [ ] 更复杂地图验证
+- [ ] 技能库扩展 (Avoid, Patrol, ...)
 
 ## 参考文献
 
-- Hasanbeig et al. "A formal methods approach to interpretable reinforcement learning for robotic planning" Science Robotics, 2019
+- Xiao Li et al. "A formal methods approach to interpretable reinforcement learning for robotic planning" Science Robotics, 2019
 
 ## License
 

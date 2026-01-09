@@ -1,0 +1,204 @@
+================================================================================
+Goal-Conditioned RL 实现计划
+Reach Skill = Goal-Conditioned Policy
+================================================================================
+
+核心立场（来自讨论）
+================================================================================
+
+"In low-complexity navigation tasks, a goal-conditioned policy can be viewed 
+as a parameterized reachability skill. This abstraction allows us to focus on 
+the separation between safety enforcement and task optimization."
+
+关键原则：
+- Safety ≠ Objective（安全不进 reward）
+- Goal = Parameter（目标是策略的参数）
+- Policy reused across goals（策略跨目标复用）
+
+
+一、目标
+================================================================================
+
+训练一个 Goal-Conditioned Policy（等价于 Reach Skill）：
+- 输入: (state, goal_direction)
+- 输出: action
+- 能力: 安全地到达任意目标位置
+- 泛化: 换目标不用重新训练
+
+
+二、当前状态
+================================================================================
+
+已完成：
+✓ 观测空间: [local_view (5×5), goal_direction (2)]
+✓ Safety Layer: LTL 公式 G(!wall) & G(!boundary)
+✓ 动作过滤: 不安全动作替换为"原地不动"
+✓ Robustness 奖励塑形
+
+待实现：
+- 环境支持随机目标采样
+- 环境支持随机起点采样
+- 训练时随机采样目标
+- 测试时验证目标泛化
+
+
+三、实现计划
+================================================================================
+
+Phase 1: 环境修改 (env.py)
+--------------------------
+
+1.1 添加参数
+    - random_goal: bool = False  # 是否随机采样目标
+    - random_start: bool = False # 是否随机采样起点
+
+1.2 提取空格位置
+    - self.empty_cells: 所有可用位置（非墙）
+    - 用于随机采样
+
+1.3 修改 reset()
+    - 支持 options={'goal': (r,c)} 指定目标
+    - 支持 options={'start': (r,c)} 指定起点
+    - random_goal=True 时随机采样目标
+    - random_start=True 时随机采样起点
+    - 确保起点 ≠ 目标
+
+1.4 更新 get_env_info()
+    - 返回当前目标位置（动态）
+
+
+Phase 2: 配置更新 (config.yaml)
+-------------------------------
+
+添加配置项：
+```yaml
+environment:
+  random_goal: true   # 训练时随机目标
+  random_start: true  # 训练时随机起点
+
+training:
+  goal_conditioned: true
+```
+
+
+Phase 3: 主程序更新 (main.py)
+-----------------------------
+
+3.1 训练模式
+    - 读取 random_goal/random_start 配置
+    - 创建环境时传入参数
+
+3.2 测试模式
+    - 支持指定测试目标列表
+    - 测试从没见过的目标位置
+    - 统计成功率
+
+
+Phase 4: SafeEnvWrapper 适配
+----------------------------
+
+4.1 确保兼容动态目标
+    - env_info 中的 goal_position 需要动态获取
+    - 或者不依赖 goal_position（当前实现已经不依赖）
+
+4.2 reset() 传递 options
+    - 透传 goal/start 参数给底层环境
+
+
+Phase 5: 测试验证
+-----------------
+
+5.1 单元测试 (tests/test_goal_conditioned.py)
+    - 测试随机目标采样
+    - 测试指定目标
+    - 测试起点≠目标
+
+5.2 训练实验
+    - 在 map1.txt (6×6) 上训练
+    - random_goal=True, random_start=True
+    - 训练 50000 步
+
+5.3 泛化测试
+    - 固定一组测试目标（训练时可能没见过）
+    - 统计到达成功率
+    - 统计平均步数
+    - 统计安全违规次数（应为 0）
+
+
+四、文件修改清单
+================================================================================
+
+| 文件 | 修改内容 | 状态 |
+|------|----------|------|
+| safe_rl_drone/env.py | 添加 random_goal/start，修改 reset() | ✓ 完成 |
+| safe_rl_drone/wrappers/safe_env_wrapper.py | 确保兼容，透传 options | ✓ 完成 |
+| config.yaml | 添加 random_goal/start 配置 | ✓ 完成 |
+| main.py | 支持 goal-conditioned 训练和测试 | ✓ 完成 |
+| tests/test_goal_conditioned.py | 新增测试文件 | ✓ 完成 |
+
+
+五、验证指标
+================================================================================
+
+训练指标：
+- episode_reward_mean: 应该逐渐上升
+- episode_len_mean: 应该逐渐下降
+- 安全干预率: 应该逐渐下降
+
+测试指标：
+- 训练目标成功率: 应该 > 90%
+- 测试目标成功率（泛化）: 应该 > 80%
+- 安全违规次数: 应该 = 0
+- 平均到达步数: 应该接近最短路径
+
+
+六、预期结果
+================================================================================
+
+成功标准：
+1. 策略能到达训练时见过的目标（基本能力）
+2. 策略能到达训练时没见过的目标（泛化能力）
+3. 全程无安全违规（形式化保证）
+
+这将验证：
+- Goal-Conditioned RL 在 GridWorld 中可行
+- Safety Layer 与 Goal-Conditioned RL 兼容
+- "Reach Skill" 抽象是正确的
+
+
+七、时间估计
+================================================================================
+
+Phase 1: 环境修改        30 分钟
+Phase 2: 配置更新        10 分钟
+Phase 3: 主程序更新      30 分钟
+Phase 4: Wrapper 适配    15 分钟
+Phase 5: 测试验证        30 分钟
+
+总计: 约 2 小时
+
+
+八、后续扩展（Phase 2+）
+================================================================================
+
+完成 Goal-Conditioned RL 后，可以：
+
+1. Task FSA 集成
+   - LTL 公式分解为子目标序列
+   - 依次把子目标喂给 Reach Skill
+   - 验证顺序任务完成
+
+2. 更复杂地图
+   - 在更大地图上测试
+   - 验证泛化边界
+
+3. 技能库扩展（未来）
+   - 如果需要更多行为（Avoid, Patrol）
+   - 把 Reach 重构为技能库的一个 Option
+
+
+================================================================================
+文档版本: v1.0
+创建日期: 2026-01-05
+状态: 待确认
+================================================================================
