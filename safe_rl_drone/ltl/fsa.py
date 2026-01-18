@@ -63,12 +63,16 @@ class FSA:
 class FSAMonitor:
     """FSA 监控器"""
     
-    def __init__(self, formula: str = None):
+    def __init__(self, formula: str = None, mode: str = 'monitor'):
         """
         Args:
             formula: LTL 公式字符串
+            mode: 自动机模式
+                - 'monitor': 用于安全监控（检测违规）
+                - 'ba': 用于任务跟踪（检测完成）
         """
         self.formula = formula
+        self.mode = mode
         self.fsa: Optional[FSA] = None
         self.current_state: int = 0
         self._spot_automaton = None
@@ -93,8 +97,11 @@ class FSAMonitor:
             f = spot.formula(formula)
             
             # 转换为自动机
-            # 使用 monitor 模式，适合运行时监控
-            aut = spot.translate(f, 'monitor', 'det')
+            # - monitor: 适合安全监控（检测违规）
+            # - ba: 适合任务跟踪（检测完成）
+            # - det: 确定性自动机
+            # - complete: 所有输入都有转移（包括违规转移）
+            aut = spot.translate(f, self.mode, 'det', 'complete')
             self._spot_automaton = aut
             
             # 提取自动机信息
@@ -116,12 +123,16 @@ class FSAMonitor:
                     label = spot.bdd_format_formula(aut.get_dict(), t.cond)
                     transitions.append(FSATransition(s, target, label))
             
-            # 识别 trap 状态（只有自环且不是接受状态）
+            # 识别 trap 状态
+            # 定义：无法到达接受状态的非接受状态 = 陷阱状态
+            # 这包括：
+            # 1. 严格陷阱（所有出边指向自己）
+            # 2. 通向陷阱的不可恢复状态
             trap_states = set()
             for s in range(num_states):
                 if s not in accepting_states:
-                    out_trans = [t for t in transitions if t.source == s]
-                    if len(out_trans) == 1 and out_trans[0].target == s:
+                    # 使用 BFS 检查是否能到达接受状态
+                    if not self._can_reach_accepting(s, accepting_states, transitions, num_states):
                         trap_states.add(s)
             
             self.fsa = FSA(
@@ -145,7 +156,7 @@ class FSAMonitor:
             
             self.current_state = initial_state
             
-            print(f"[FSA] 从公式 '{formula}' 构建自动机")
+            print(f"[FSA] 从公式 '{formula}' 构建自动机 (模式: {self.mode})")
             print(f"[FSA] 状态数: {num_states}, 接受状态: {accepting_states}")
             
         except Exception as e:
@@ -178,6 +189,48 @@ class FSAMonitor:
         self.current_state = 0
         print(f"[FSA] 使用简化自动机（公式: {formula}）")
     
+    def _can_reach_accepting(self, 
+                            start_state: int,
+                            accepting_states: Set[int],
+                            transitions: List[FSATransition],
+                            num_states: int) -> bool:
+        """
+        检查从 start_state 是否能到达任何接受状态
+        
+        使用 BFS 遍历所有可达状态
+        
+        Args:
+            start_state: 起始状态
+            accepting_states: 接受状态集合
+            transitions: 所有转移
+            num_states: 状态总数
+            
+        Returns:
+            True 如果能到达接受状态
+        """
+        if start_state in accepting_states:
+            return True
+        
+        visited = set([start_state])
+        queue = [start_state]
+        
+        while queue:
+            current = queue.pop(0)
+            
+            # 获取所有出边
+            for trans in transitions:
+                if trans.source == current:
+                    target = trans.target
+                    
+                    if target in accepting_states:
+                        return True
+                    
+                    if target not in visited:
+                        visited.add(target)
+                        queue.append(target)
+        
+        return False
+    
     def set_prop_manager(self, prop_manager):
         """设置原子命题管理器"""
         self._prop_manager = prop_manager
@@ -189,7 +242,7 @@ class FSAMonitor:
     
     def step(self, state: np.ndarray) -> Tuple[int, bool, bool]:
         """
-        根据当前环境状态更新自动机状态
+        根据当前环境状态和自动机状态更新自动机状态
         
         Args:
             state: 环境状态
@@ -231,7 +284,17 @@ class FSAMonitor:
         return self._eval_bool_expr(label, state)
     
     def _eval_bool_expr(self, expr: str, state: np.ndarray) -> bool:
-        """评估布尔表达式"""
+        """
+        评估布尔表达式
+        
+        支持的运算符（按优先级从低到高）：
+        1. | (或)
+        2. & (与)
+        3. ! (非)
+        4. () (括号)
+        
+        正确处理运算符优先级和括号
+        """
         expr = expr.strip()
         
         # 处理常量
@@ -240,26 +303,88 @@ class FSAMonitor:
         if expr == '0' or expr.lower() == 'false':
             return False
         
-        # 处理否定
+        # 去除最外层括号（如果有）
+        if expr.startswith('(') and expr.endswith(')'):
+            # 检查是否是匹配的最外层括号
+            if self._is_outer_parens(expr):
+                return self._eval_bool_expr(expr[1:-1], state)
+        
+        # 处理或（最低优先级）
+        # 找到不在括号内的 |
+        or_pos = self._find_operator_outside_parens(expr, '|')
+        if or_pos != -1:
+            left = expr[:or_pos].strip()
+            right = expr[or_pos+1:].strip()
+            return self._eval_bool_expr(left, state) or self._eval_bool_expr(right, state)
+        
+        # 处理与（中等优先级）
+        # 找到不在括号内的 &
+        and_pos = self._find_operator_outside_parens(expr, '&')
+        if and_pos != -1:
+            left = expr[:and_pos].strip()
+            right = expr[and_pos+1:].strip()
+            return self._eval_bool_expr(left, state) and self._eval_bool_expr(right, state)
+        
+        # 处理否定（最高优先级）
         if expr.startswith('!'):
             inner = expr[1:].strip()
             return not self._eval_bool_expr(inner, state)
-        
-        # 处理与
-        if '&' in expr:
-            parts = expr.split('&')
-            return all(self._eval_bool_expr(p.strip(), state) for p in parts)
-        
-        # 处理或
-        if '|' in expr:
-            parts = expr.split('|')
-            return any(self._eval_bool_expr(p.strip(), state) for p in parts)
         
         # 原子命题
         try:
             return self._prop_manager.evaluate(expr, state)
         except:
             return True  # 未知命题默认为真
+    
+    def _is_outer_parens(self, expr: str) -> bool:
+        """
+        检查表达式最外层的括号是否匹配
+        
+        例如：
+        - "(a & b)" -> True
+        - "(a) & (b)" -> False（括号不是最外层）
+        """
+        if not (expr.startswith('(') and expr.endswith(')')):
+            return False
+        
+        depth = 0
+        for i, ch in enumerate(expr):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            
+            # 如果在中间某处深度降到 0，说明不是最外层括号
+            if depth == 0 and i < len(expr) - 1:
+                return False
+        
+        return True
+    
+    def _find_operator_outside_parens(self, expr: str, op: str) -> int:
+        """
+        找到不在括号内的运算符位置
+        
+        从右往左找，这样可以正确处理左结合
+        
+        Args:
+            expr: 表达式
+            op: 运算符（'&' 或 '|'）
+            
+        Returns:
+            运算符位置，如果没找到返回 -1
+        """
+        depth = 0
+        # 从右往左找（处理左结合）
+        for i in range(len(expr) - 1, -1, -1):
+            ch = expr[i]
+            if ch == ')':
+                depth += 1
+            elif ch == '(':
+                depth -= 1
+            elif ch == op and depth == 0:
+                return i
+        
+        return -1
     
     def is_safe(self) -> bool:
         """检查当前是否安全（不在 trap 状态）"""

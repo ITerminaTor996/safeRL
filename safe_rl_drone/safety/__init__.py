@@ -2,6 +2,6 @@
 # 包含安全监控和动作过滤
 
 from .monitor import SafetyMonitor
-from .action_filter import ActionFilter
+from .action_filter import SafetyFilter, ActionFilter
 
-__all__ = ['SafetyMonitor', 'ActionFilter']
+__all__ = ['SafetyMonitor', 'SafetyFilter', 'ActionFilter']

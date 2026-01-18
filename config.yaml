@@ -1,64 +1,81 @@
-# Safe RL Drone 配置文件 v2.0
+# Safe RL Drone 配置文件 v3.0
 # ============================================================
-# Goal-Conditioned RL: 策略等价于 Reach(goal) 技能
-# Safety Layer: LTL 形式化保证，与 RL 训练解耦
+# 核心理念：
+# - Safety Specification: 形式化保证（硬约束，零违规）
+# - Task Specification: RL 学习（软目标，Robustness 引导）
+# - Goal-Conditioned Policy: 泛化到任意目标
 # ============================================================
 
 # 环境设置
 environment:
-  map_path: "maps/map5_dynamic.txt"  # 20×20 高墙密度地图
-  render: false          # 是否渲染画面
-  view_size: 5           # 局部视野大小 (奇数，如 3, 5, 7)
-  random_goal: true      # 训练时随机采样目标位置
-  random_start: true     # 训练时随机采样起始位置
-  max_episode_steps: 1000  # 每回合最大步数（大地图需要更多）
+  map_path: "maps/map4_large.txt"  # 地图文件（离散环境）
+  render: false         # 是否渲染画面（WSL 建议 false）
+  view_size: 5          # 局部视野大小（奇数）
+  random_goal: true     # 训练时随机采样目标
+  random_start: true    # 训练时随机采样起点
+  max_episode_steps: 1000  # 每回合最大步数
   dynamic_obstacles: true  # 是否启用动态障碍物
-  obstacle_change_prob: 0.02  # 每步每个墙变化的概率
+  obstacle_change_prob: 0.01  # 每步障碍物变化概率
 
 # 原子命题定义
-# - "auto": 环境自动提供
-# - type: "position": 指定坐标位置
-# - type: "region": 指定区域
-atomic_propositions:
+propositions:
   # 环境自动提供的命题
   wall: "auto"
   goal: "auto"
   boundary: "auto"
-  empty: "auto"
   
-  # 用户自定义命题示例（取消注释使用）
-  # checkpoint1:
+  # 用户自定义命题（可选）
+  # wp1:
   #   type: "position"
-  #   pos: [2, 3]
-  # danger_zone:
-  #   type: "region"
-  #   positions: [[1, 1], [1, 2], [2, 1]]
-  #   avoid: true
+  #   pos: [5, 5]
+  # wp2:
+  #   type: "position"
+  #   pos: [10, 10]
 
-# 安全设置（形式化保证，硬约束）
-safety:
-  enabled: true
-  formula: "G(!wall) & G(!boundary)"   # LTL 安全公式
-  # 支持的算子: G(全局), F(最终), X(下一步), U(直到), &(与), |(或), !(非), ->(蕴含)
-  # 示例:
-  #   "G(!wall)": 永远不撞墙
-  #   "G(!wall) & G(!boundary)": 永远不撞墙且不越界
-  #   "G(!danger_zone)": 永远避开危险区
-  unsafe_penalty: -1.0       # 尝试不安全动作的惩罚
+# 规范定义（核心）
+specifications:
+  # 安全规范（硬约束，通过 SafetyFilter 强制保证）
+  safety:
+    enabled: true
+    formula: "G(!wall) & G(!boundary)"
+    filter_method: "enumeration"  # 当前：enumeration（枚举），未来：geometric, cbf
+    # 支持的算子: G, F, X, U, &, |, !, ->
+    # 示例:
+    #   "G(!wall)": 永远不撞墙
+    #   "G(!wall) & G(!boundary)": 不撞墙且不越界
+    
+  # 任务规范（软引导，通过 TaskRewardShaper 引导 RL）
+  task:
+    enabled: true
+    formula: "F(goal)"  # STL 公式
+    # 复杂任务示例:
+    #   "F(wp1) & F(wp2) & F(goal)": 顺序任务
+    #   "F(goal1) | F(goal2)": 多目标选择
 
-# 任务设置（RL 学习，软目标）
-task:
-  type: "reach_goal"         # 任务类型
-  use_robustness_reward: true  # 是否使用 robustness 作为奖励塑形
-  robustness_weight: 0.1     # robustness 奖励权重
-  goal_reward: 10.0          # 到达目标奖励
-  step_penalty: -0.05        # 每步惩罚（大地图用更小值）
+# 奖励设计
+reward:
+  # 环境基础奖励
+  goal_reached: 10.0    # 到达目标
+  step_penalty: -0.05   # 每步惩罚
+  safety_violation: -1.0  # 安全违规（理论上不会触发）
+  
+  # 任务奖励塑形（来自 TaskRewardShaper）
+  task_shaping:
+    robustness:
+      enabled: true
+      weight: 0.1       # Robustness 奖励权重（稠密）
+    progress:
+      enabled: true
+      weight: 1.0       # FSA 状态跳转奖励（稀疏）
+    acceptance:
+      enabled: true
+      weight: 10.0      # 到达接受状态奖励（稀疏）
 
 # 训练设置
 training:
   enabled: true              # 是否进行训练
   algorithm: "PPO"           # 强化学习算法
-  total_timesteps: 300000    # 训练总步数（20×20地图需要更多）
+  total_timesteps: 500000    # 训练总步数（20×20地图需要更多）
   device: "cpu"              # 训练设备: cpu 或 cuda
   verbose: 1                 # 日志详细程度
 
@@ -74,4 +91,4 @@ testing:
 model:
   save_path: "models/"       # 模型保存路径
   auto_save: true            # 训练后自动保存
-  load_path: "/mnt/e/RL+形式化方法/models/ppo_safe"               # 加载已有模型路径（留空则创建新模型）
+  load_path: "/mnt/e/RL+形式化方法/models/ppo_safe"               # 加载已有模型路径（留空则创建新模型）/mnt/e/RL+形式化方法/models/ppo_safe
