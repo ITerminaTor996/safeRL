@@ -148,117 +148,287 @@ class SafetyFilter:
 
 ### Step 1.3: TaskRewardShaper 类
 
-**目标**: 创建独立的任务奖励塑形器类
+**目标**: 创建独立的任务奖励塑形器类，基于 Task FSA + Robustness 提供多层次奖励
 
-**设计方案**:
+**状态**: ✓ 已完成设计讨论
+
+---
+
+#### 设计讨论总结
+
+**核心思想**：
+- 任务奖励 = Robustness 增量 + FSA 进度 + 任务完成 + 过滤器惩罚 + 时间惩罚
+- 使用 Büchi 自动机（ba 模式）构建任务 FSA
+- 预计算 BFS 距离（每个状态到接受状态的最短路径）
+
+**奖励组件**（6 个部分）：
+
+1. **Robustness 增量奖励**（稠密，主要引导信号）
+   - 计算方式：`r_rho = w_rho * (ρ_t - ρ_{t-1})`
+   - 只用当前状态和上一状态，不用完整轨迹
+   - 语义：ρ 增加 = 更接近满足任务 = 正奖励
+   - 权重：`w_rho = 0.1`
+
+2. **FSA 进度奖励**（稀疏，里程碑）
+   - 计算方式：`r_progress = w_progress * (value_t - value_{t+1})`
+   - `value_t` = BFS 距离（到接受状态的步数，正数）
+   - 语义：距离减少 = 前进 = 正奖励；距离增加 = 后退 = 负奖励
+   - 例子：从距离 2 前进到距离 1 → `r = 1.0 * (2 - 1) = 1.0`
+   - 权重：`w_progress = 1.0`
+
+3. **任务完成奖励**（稀疏，最终目标）
+   - 计算方式：`r_accept = w_accept * is_accepting`
+   - 到达接受状态时触发
+   - 权重：`w_accept = 10.0`
+
+4. **陷阱状态惩罚**（稀疏，任务失败）
+   - 计算方式：`r_trap = w_trap * (-10.0) * entered_trap`
+   - 进入任务 FSA 的陷阱状态时触发
+   - 陷阱状态定义：无法到达接受状态的非接受状态（与安全 FSA 定义一致）
+   - **关键**：进入陷阱后**立即终止 episode**
+   - 理由：任务已经不可能完成，后续奖励引导没有意义
+   - 权重：`w_trap = 1.0`，惩罚值 `-10.0`（与完成奖励对称）
+
+5. **过滤器惩罚**（稀疏，学习安全）
+   - 计算方式：`r_filter = w_filter * (-0.5) * filtered`
+   - 触发 SafetyFilter 时给予惩罚
+   - 理由：让 RL 学会主动避免不安全行为，减少对过滤器的依赖
+   - 权重：`w_filter = 1.0`
+
+6. **时间惩罚**（稠密，鼓励效率）
+   - 计算方式：`r_time = w_time * (-0.01)`
+   - 每步固定惩罚，鼓励最短路径
+   - 权重：`w_time = 1.0`
+
+**总奖励公式**：
+```python
+# 正常情况
+reward = (
+    w_rho * (rho_t - rho_{t-1})           # Robustness 增量
+    + w_progress * (value_t - value_{t+1}) # FSA 进度
+    + w_accept * is_accepting              # 任务完成
+    + w_filter * (-0.5) * filtered         # 过滤器惩罚
+    + w_time * (-0.01)                     # 时间惩罚
+)
+
+# 进入陷阱状态
+if entered_trap:
+    reward = w_trap * (-10.0)
+    terminated = True  # 立即终止 episode
+```
+
+---
+
+#### Robustness 计算方式
+
+**关键决策**：只用当前状态，不用历史轨迹
+
+**理由**：
+- 目标是提供**引导信号**，不是判断任务是否完成
+- 只需要知道"往哪个方向走"，不需要完整轨迹
+- 对于 reach-avoid 任务，当前状态的距离就是最好的信号
+
+**实现**：
+```python
+# 当前状态的 robustness
+rho_t = calculator.compute(state_t, trajectory=[state_t])
+
+# 上一状态的 robustness
+rho_{t-1} = calculator.compute(state_{t-1}, trajectory=[state_{t-1}])
+
+# 增量奖励
+r_rho = rho_t - rho_{t-1}
+```
+
+**对于时序算子的简化**：
+- `F(goal)`：只看当前时刻 → `ρ(goal, state_t)` = 到目标的负距离
+- `G(!wall)`：只看当前时刻 → `ρ(!wall, state_t)` = 到墙的距离
+- 时序语义已经编码在 FSA 结构中，robustness 只提供稠密引导
+
+---
+
+#### 类设计方案
 
 ```python
 # safe_rl_drone/safety/task_reward_shaper.py
 
 class TaskRewardShaper:
     """
-    任务奖励塑形器：基于 Task FSA + Robustness 计算奖励
+    任务奖励塑形器：基于 Task FSA + Robustness 计算多层次奖励
     """
-    def __init__(self, task_formula, prop_evaluator, reward_weights):
+    def __init__(self, task_formula, prop_manager, reward_weights):
         """
         Args:
             task_formula: 任务规范字符串（如 "F(goal)"）
-            prop_evaluator: 命题评估器
+            prop_manager: 原子命题管理器
             reward_weights: 奖励权重配置（dict）
         """
-        self.formula = parse_formula(task_formula)
-        self.automaton = build_automaton(task_formula)
-        self.prop_evaluator = prop_evaluator
-        self.current_state = self.automaton.initial_state
+        self.task_formula = task_formula
+        self.prop_manager = prop_manager
         self.weights = reward_weights
         
-        # 预计算 FSA 状态价值（到接受状态的距离）
+        # 构建 Task FSA（使用 ba 模式）
+        self.fsa_monitor = FSAMonitor(task_formula, mode='ba')
+        self.fsa_monitor.set_prop_manager(prop_manager)
+        
+        # 构建 Robustness 计算器
+        parser = LTLParser()
+        parser.parse(task_formula)
+        self.rho_calculator = RobustnessCalculator(parser, prop_manager)
+        
+        # 预计算 FSA 状态价值（BFS 距离）
         self.state_values = self._compute_state_values()
+        
+        # 历史状态（用于计算增量）
+        self.prev_state = None
+        self.prev_rho = None
     
-    def compute_reward(self, state):
+    def compute_reward(self, state, filtered=False):
         """
         计算任务奖励
         
         Args:
-            state: 当前状态
+            state: 当前状态（np.ndarray）
+            filtered: 是否触发了安全过滤器
             
         Returns:
             reward: 总奖励（float）
-            info: 调试信息（dict）
+            info: 调试信息（dict，包含 terminated 标志）
         """
-        # 1. 计算 Robustness（稠密）
-        rho = compute_robustness(self.formula, state, self.prop_evaluator)
+        # 1. Robustness 增量奖励
+        rho_t = self.rho_calculator.compute(state, trajectory=[state])
+        if self.prev_rho is not None:
+            r_rho = self.weights['robustness'] * (rho_t - self.prev_rho)
+        else:
+            r_rho = 0.0
         
-        # 2. 评估命题真值
-        props = self.prop_evaluator.evaluate_all(state)
+        # 2. FSA 进度奖励
+        prev_fsa_state = self.fsa_monitor.current_state
+        new_fsa_state, is_accepting, is_trap = self.fsa_monitor.step(state)
         
-        # 3. 检查 FSA 状态转移
-        next_state = self.automaton.step(self.current_state, props)
+        # 检查是否进入陷阱状态
+        if is_trap:
+            # 任务失败，大惩罚 + 终止 episode
+            r_trap = self.weights['trap'] * (-10.0)
+            
+            return r_trap, {
+                'terminated': True,
+                'reason': 'task_trap_state',
+                'fsa_state': new_fsa_state,
+                'is_trap': True,
+                'r_trap': r_trap
+            }
         
-        # 4. 计算状态跳转奖励（稀疏）
-        progress_reward = 0.0
-        if next_state != self.current_state:
-            old_value = self.state_values.get(self.current_state, 0)
-            new_value = self.state_values.get(next_state, 0)
-            if new_value > old_value:
-                progress_reward = 1.0
+        prev_value = self.state_values.get(prev_fsa_state, 0)
+        new_value = self.state_values.get(new_fsa_state, 0)
+        r_progress = self.weights['progress'] * (prev_value - new_value)
         
-        # 5. 检查接受状态（稀疏）
-        acceptance_reward = 0.0
-        if self.automaton.is_accepting(next_state):
-            acceptance_reward = 1.0
+        # 3. 任务完成奖励
+        r_accept = self.weights['acceptance'] * (1.0 if is_accepting else 0.0)
         
-        # 6. 更新状态
-        self.current_state = next_state
+        # 4. 过滤器惩罚
+        r_filter = self.weights['filter'] * (-0.5 if filtered else 0.0)
         
-        # 7. 组合奖励
-        total_reward = (
-            self.weights['robustness'] * rho +
-            self.weights['progress'] * progress_reward +
-            self.weights['acceptance'] * acceptance_reward
-        )
+        # 5. 时间惩罚
+        r_time = self.weights['time'] * (-0.01)
+        
+        # 总奖励
+        total_reward = r_rho + r_progress + r_accept + r_filter + r_time
+        
+        # 更新历史
+        self.prev_state = state.copy()
+        self.prev_rho = rho_t
         
         return total_reward, {
-            'rho': rho,
-            'progress': progress_reward,
-            'acceptance': acceptance_reward,
-            'fsa_state': self.current_state
+            'r_rho': r_rho,
+            'r_progress': r_progress,
+            'r_accept': r_accept,
+            'r_filter': r_filter,
+            'r_time': r_time,
+            'rho': rho_t,
+            'fsa_state': new_fsa_state,
+            'is_accepting': is_accepting,
+            'terminated': False
         }
     
     def _compute_state_values(self):
-        """BFS 计算状态价值"""
+        """
+        BFS 计算状态价值（到接受状态的距离）
+        
+        Returns:
+            state_values: {state_id: -distance}
+        """
+        if self.fsa_monitor.fsa is None:
+            return {}
+        
+        fsa = self.fsa_monitor.fsa
+        accepting_states = fsa.accepting_states
+        
         # 从接受状态反向 BFS
         values = {}
-        queue = [(s, 0) for s in self.automaton.accepting_states]
-        visited = set(self.automaton.accepting_states)
+        queue = [(s, 0) for s in accepting_states]
+        visited = set(accepting_states)
         
         while queue:
             state, dist = queue.pop(0)
-            values[state] = -dist  # 距离越近，价值越大
+            values[state] = dist  # 距离越近，价值越大
             
-            for prev_state in self.automaton.predecessors(state):
-                if prev_state not in visited:
-                    visited.add(prev_state)
-                    queue.append((prev_state, dist + 1))
+            # 找到所有能到达当前状态的前驱状态
+            for trans in fsa.transitions:
+                if trans.target == state and trans.source not in visited:
+                    visited.add(trans.source)
+                    queue.append((trans.source, dist + 1))
         
         return values
     
     def reset(self):
-        """重置 FSA 状态"""
-        self.current_state = self.automaton.initial_state
+        """重置状态"""
+        self.fsa_monitor.reset()
+        self.prev_state = None
+        self.prev_rho = None
 ```
 
-**讨论点**:
-1. 类接口是否合理？
-2. 奖励权重如何设置（默认值）？
-3. `_compute_state_values` 的实现是否正确？
-4. 如何处理没有接受状态的情况？
+---
 
-**交付物**:
+#### 默认权重配置
+
+```python
+DEFAULT_REWARD_WEIGHTS = {
+    'robustness': 0.1,   # Robustness 增量（稠密引导）
+    'progress': 1.0,     # FSA 进度（稀疏里程碑）
+    'acceptance': 10.0,  # 任务完成（最终目标）
+    'trap': 1.0,         # 陷阱惩罚（任务失败，-10.0）
+    'filter': 1.0,       # 过滤器惩罚（学习安全，-0.5）
+    'time': 1.0          # 时间惩罚（鼓励效率，-0.01）
+}
+```
+
+---
+
+#### 讨论点
+
+1. ✓ **Robustness 计算**：只用当前状态，不用历史轨迹
+2. ✓ **奖励组件**：5 个部分，权重合理
+3. ✓ **过滤器惩罚**：必须给，让 RL 学会主动安全
+4. ✓ **时间惩罚**：每步 -0.01，鼓励最短路径
+5. ✓ **进度奖励**：前进奖励，后退惩罚
+
+**待确认**：
+- ✓ BFS 距离计算是否正确？
+- ✓ 权重是否需要调整？
+- ✓ 陷阱状态处理：进入后立即终止 episode
+- ✓ 陷阱状态定义：复用 `fsa.py` 中的代码（无法到达接受状态的非接受状态）
+- 是否需要其他奖励组件？
+
+---
+
+#### 交付物
+
 - `safe_rl_drone/safety/task_reward_shaper.py`
 - 单元测试：`tests/test_task_reward_shaper.py`
+- 配置文件更新：添加 `reward_weights` 字段
 
-**预计时间**: 1 小时讨论 + 实现 + 审查
+**预计时间**: 1.5 小时讨论（已完成）+ 2 小时实现 + 1 小时测试
 
 ---
 
@@ -318,20 +488,33 @@ class SafeEnvWrapper(gym.Wrapper):
         # 2. 执行动作
         obs, base_reward, terminated, truncated, info = self.env.step(safe_action)
         
-        # 3. 计算任务奖励
+        # 3. 计算任务奖励（传入 filtered 标志）
         task_reward, task_info = self.task_reward_shaper.compute_reward(
-            self._get_current_state()
+            self._get_current_state(),
+            filtered=filtered  # 告诉 TaskRewardShaper 是否触发了过滤器
         )
         
-        # 4. 组合奖励
-        total_reward = base_reward + task_reward
+        # 4. 使用任务奖励（不使用环境的 base_reward）
+        # 理由：我们的 6 个奖励组件已经完全覆盖了任务需求
+        total_reward = task_reward
         
-        # 5. 更新 info
+        # 5. 处理任务陷阱状态的终止
+        if task_info.get('terminated', False):
+            terminated = True  # 任务失败，终止 episode
+        
+        # 6. 更新 info
         info.update({
             'safety_filtered': filtered,
             'task_rho': task_info['rho'],
-            'task_progress': task_info['progress'],
-            'task_acceptance': task_info['acceptance']
+            'task_fsa_state': task_info['fsa_state'],
+            'task_is_accepting': task_info['is_accepting'],
+            'task_is_trap': task_info['is_trap'],
+            'r_rho': task_info['r_rho'],
+            'r_progress': task_info['r_progress'],
+            'r_accept': task_info['r_accept'],
+            'r_trap': task_info.get('r_trap', 0.0),
+            'r_filter': task_info['r_filter'],
+            'r_time': task_info['r_time']
         })
         
         return obs, total_reward, terminated, truncated, info

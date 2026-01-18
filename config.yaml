@@ -59,17 +59,14 @@ reward:
   step_penalty: -0.05   # 每步惩罚
   safety_violation: -1.0  # 安全违规（理论上不会触发）
   
-  # 任务奖励塑形（来自 TaskRewardShaper）
-  task_shaping:
-    robustness:
-      enabled: true
-      weight: 0.1       # Robustness 奖励权重（稠密）
-    progress:
-      enabled: true
-      weight: 1.0       # FSA 状态跳转奖励（稀疏）
-    acceptance:
-      enabled: true
-      weight: 10.0      # 到达接受状态奖励（稀疏）
+  # 任务奖励塑形权重（来自 TaskRewardShaper）
+  task_shaping_weights:
+    robustness: 0.1     # Robustness 增量奖励（稠密引导）
+    progress: 1.0       # FSA 进度奖励（稀疏里程碑）
+    acceptance: 10.0    # 任务完成奖励（最终目标）
+    trap: 1.0           # 陷阱状态惩罚（任务失败，-10.0）
+    filter: 1.0         # 过滤器惩罚（学习安全，-0.5）
+    time: 1.0           # 时间惩罚（鼓励效率，-0.01）
 
 # 训练设置
 training:

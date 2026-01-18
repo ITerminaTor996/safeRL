@@ -9,7 +9,7 @@ from .ltl import (
     RobustnessCalculator,
     FSAMonitor
 )
-from .safety import SafetyMonitor, SafetyFilter, ActionFilter
+from .safety import SafetyFilter, ActionFilter, TaskRewardShaper
 
 __all__ = [
     'GridWorldEnv',
@@ -18,7 +18,7 @@ __all__ = [
     'LTLParser',
     'RobustnessCalculator',
     'FSAMonitor',
-    'SafetyMonitor',
     'SafetyFilter',
-    'ActionFilter'  # 向后兼容
+    'ActionFilter',  # 向后兼容
+    'TaskRewardShaper'
 ]
