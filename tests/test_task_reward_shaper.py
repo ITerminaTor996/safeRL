@@ -1,5 +1,11 @@
 """
-测试 TaskRewardShaper 模块
+测试 TaskRewardShaper 模块 - 边条件 Robustness 计算
+
+测试内容：
+1. 基于真实 FSA 边条件计算 robustness
+2. 排除自环边，只考虑能推进状态的边
+3. AND 取 min，OR 取 max，NOT 取负
+4. 进度奖励只在 FSA 状态改变时给
 """
 
 import sys
@@ -7,308 +13,365 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
-from safe_rl_drone.safety.task_reward_shaper import TaskRewardShaper, DEFAULT_REWARD_WEIGHTS
-from safe_rl_drone.ltl.propositions import AtomicPropositionManager
+from safe_rl_drone.safety.task_reward_shaper import TaskRewardShaper
+from safe_rl_drone.ltl.fsa import FSAMonitor
+from safe_rl_drone.ltl.propositions import (
+    AtomicPropositionManager, 
+    PositionProposition,
+    RegionProposition
+)
 
 
-def test_task_reward_shaper_basic():
-    """测试 TaskRewardShaper - 基本功能"""
+def test_simple_eventually():
+    """测试简单公式 F(goal) - 排除自环边"""
     print("=" * 60)
-    print("测试 TaskRewardShaper - 基本功能")
-    print("=" * 60)
-    
-    # 创建命题管理器
-    prop_manager = AtomicPropositionManager()
-    prop_manager.register_auto_propositions()
-    
-    env_info = {
-        'wall_positions': {(1, 1), (2, 2)},
-        'goal_position': (5, 5),
-        'grid_size': (6, 6)
-    }
-    prop_manager.update_env_info(env_info)
-    
-    # 创建 TaskRewardShaper
-    task_formula = "F(goal)"
-    shaper = TaskRewardShaper(task_formula, prop_manager)
-    
-    print(f"\n任务公式: {task_formula}")
-    print(f"目标位置: {env_info['goal_position']}")
-    print(f"状态价值: {shaper.state_values}")
-    
-    # 测试场景 1: 朝目标前进
-    print("\n测试场景 1: 朝目标前进")
-    print("-" * 40)
-    
-    shaper.reset()
-    
-    # 初始位置
-    state1 = np.array([0, 0])
-    reward1, info1 = shaper.compute_reward(state1, filtered=False)
-    print(f"位置 {tuple(state1)}: reward={reward1:.3f}")
-    print(f"  r_rho={info1['r_rho']:.3f}, r_progress={info1['r_progress']:.3f}")
-    print(f"  r_accept={info1['r_accept']:.3f}, r_filter={info1['r_filter']:.3f}")
-    print(f"  r_time={info1['r_time']:.3f}")
-    print(f"  rho={info1['rho']:.3f}, fsa_state={info1['fsa_state']}")
-    
-    # 前进一步（更接近目标）
-    state2 = np.array([1, 1])
-    reward2, info2 = shaper.compute_reward(state2, filtered=False)
-    print(f"位置 {tuple(state2)}: reward={reward2:.3f}")
-    print(f"  r_rho={info2['r_rho']:.3f}, r_progress={info2['r_progress']:.3f}")
-    print(f"  r_accept={info2['r_accept']:.3f}, r_filter={info2['r_filter']:.3f}")
-    print(f"  r_time={info2['r_time']:.3f}")
-    print(f"  rho={info2['rho']:.3f}, fsa_state={info2['fsa_state']}")
-    
-    # 验证 robustness 增加（更接近目标）
-    assert info2['rho'] > info1['rho'], "Robustness 应该增加"
-    assert info2['r_rho'] > 0, "Robustness 增量奖励应该为正"
-    
-    # 测试场景 2: 到达目标
-    print("\n测试场景 2: 到达目标")
-    print("-" * 40)
-    
-    shaper.reset()
-    
-    # 接近目标
-    state3 = np.array([4, 4])
-    reward3, info3 = shaper.compute_reward(state3, filtered=False)
-    print(f"位置 {tuple(state3)}: reward={reward3:.3f}")
-    print(f"  rho={info3['rho']:.3f}, is_accepting={info3['is_accepting']}")
-    
-    # 到达目标
-    state4 = np.array([5, 5])
-    reward4, info4 = shaper.compute_reward(state4, filtered=False)
-    print(f"位置 {tuple(state4)}: reward={reward4:.3f}")
-    print(f"  r_accept={info4['r_accept']:.3f}")
-    print(f"  rho={info4['rho']:.3f}, is_accepting={info4['is_accepting']}")
-    
-    # 验证到达目标有大奖励
-    assert info4['r_accept'] > 0, "到达目标应该有完成奖励"
-    assert info4['is_accepting'], "应该在接受状态"
-    
-    # 测试场景 3: 触发过滤器
-    print("\n测试场景 3: 触发过滤器")
-    print("-" * 40)
-    
-    shaper.reset()
-    
-    state5 = np.array([2, 2])
-    reward5, info5 = shaper.compute_reward(state5, filtered=True)
-    print(f"位置 {tuple(state5)}, filtered=True: reward={reward5:.3f}")
-    print(f"  r_filter={info5['r_filter']:.3f}")
-    
-    # 验证过滤器惩罚
-    assert info5['r_filter'] < 0, "触发过滤器应该有惩罚"
-    
-    print("\n" + "=" * 60)
-    print("TaskRewardShaper 基本功能测试通过！")
-    print("=" * 60)
-
-
-def test_task_reward_shaper_progress():
-    """测试 TaskRewardShaper - FSA 进度奖励"""
-    print("\n" + "=" * 60)
-    print("测试 TaskRewardShaper - FSA 进度奖励")
+    print("测试 1: F(goal) - 排除自环边")
     print("=" * 60)
     
-    # 创建命题管理器
     prop_manager = AtomicPropositionManager()
     prop_manager.register_auto_propositions()
     
     env_info = {
         'wall_positions': set(),
         'goal_position': (5, 5),
-        'grid_size': (6, 6)
+        'grid_size': (10, 10)
     }
     prop_manager.update_env_info(env_info)
     
-    # 创建 TaskRewardShaper
-    task_formula = "F(goal)"
-    shaper = TaskRewardShaper(task_formula, prop_manager)
+    shaper = TaskRewardShaper("F(goal)", prop_manager)
     
-    print(f"\n任务公式: {task_formula}")
-    print(f"状态价值: {shaper.state_values}")
+    print(f"\n公式: F(goal)")
+    print(f"目标: (5, 5)")
+    print(f"FSA 转移边:")
+    for t in shaper.fsa_monitor.fsa.transitions:
+        is_self_loop = "（自环，排除）" if t.source == t.target else "（非自环，计算）"
+        print(f"  {t} {is_self_loop}")
     
-    # 模拟轨迹
-    trajectory = [
-        np.array([0, 0]),
-        np.array([1, 1]),
-        np.array([2, 2]),
-        np.array([3, 3]),
-        np.array([4, 4]),
-        np.array([5, 5]),  # 目标
+    # F(goal) 的 FSA：
+    # q1 --[goal]--> q0 (接受)  ← 非自环，计算这个
+    # q1 --[!goal]--> q1        ← 自环，排除
+    # q0 --[1]--> q0            ← 自环，排除
+    
+    test_positions = [
+        ((0, 0), "远离目标"),
+        ((3, 3), "接近目标"),
+        ((5, 5), "在目标上"),
     ]
     
-    shaper.reset()
-    
-    print("\n模拟轨迹:")
+    print(f"\n边条件 Robustness（只考虑非自环边 [goal]）:")
     print("-" * 40)
     
-    total_reward = 0.0
-    for i, state in enumerate(trajectory):
-        reward, info = shaper.compute_reward(state, filtered=False)
-        total_reward += reward
+    for pos, desc in test_positions:
+        shaper.reset()
+        state = np.array(pos)
+        rho = shaper.compute_edge_based_robustness(state)
         
-        print(f"Step {i}: pos={tuple(state)}, reward={reward:.3f}")
-        print(f"  r_rho={info['r_rho']:.3f}, r_progress={info['r_progress']:.3f}")
-        print(f"  r_accept={info['r_accept']:.3f}, r_time={info['r_time']:.3f}")
-        print(f"  rho={info['rho']:.3f}, fsa_state={info['fsa_state']}")
-        print(f"  is_accepting={info['is_accepting']}")
+        # 非自环边只有 [goal]，期望值就是 ρ(goal)
+        expected = prop_manager.robustness('goal', state)
+        
+        print(f"位置 {pos} ({desc}): rho={rho:.2f}, 期望={expected:.2f}")
+        assert abs(rho - expected) < 0.1, f"计算错误: {rho} != {expected}"
     
-    print(f"\n总奖励: {total_reward:.3f}")
-    
-    # 验证最终到达目标
-    assert info['is_accepting'], "最终应该到达接受状态"
-    assert info['r_accept'] > 0, "最终应该有完成奖励"
-    
-    print("\n" + "=" * 60)
-    print("TaskRewardShaper 进度奖励测试通过！")
-    print("=" * 60)
+    print("\n✓ 测试通过!")
 
 
-def test_task_reward_shaper_trap():
-    """测试 TaskRewardShaper - 陷阱状态处理"""
+def test_multi_goal_or():
+    """测试多目标选择 F(goal1 | goal2) - 真实 FSA 边条件"""
     print("\n" + "=" * 60)
-    print("测试 TaskRewardShaper - 陷阱状态处理")
+    print("测试 2: F(goal1 | goal2) - OR 条件")
     print("=" * 60)
     
-    # 创建命题管理器
     prop_manager = AtomicPropositionManager()
     prop_manager.register_auto_propositions()
     
-    # 注册一个"禁区"命题
-    from safe_rl_drone.ltl.propositions import PositionProposition
-    prop_manager.register_proposition(
-        'forbidden', PositionProposition('forbidden', (3, 3))
-    )
+    prop_manager.register_proposition('goal1', PositionProposition('goal1', (2, 2)))
+    prop_manager.register_proposition('goal2', PositionProposition('goal2', (8, 8)))
+    
+    env_info = {
+        'wall_positions': set(),
+        'goal_position': (5, 5),  # 默认 goal，不影响测试
+        'grid_size': (10, 10)
+    }
+    prop_manager.update_env_info(env_info)
+    
+    # 使用真实公式构建 FSA
+    shaper = TaskRewardShaper("F(goal1 | goal2)", prop_manager)
+    
+    print(f"\n公式: F(goal1 | goal2)")
+    print(f"goal1: (2, 2), goal2: (8, 8)")
+    print(f"FSA 转移边:")
+    for t in shaper.fsa_monitor.fsa.transitions:
+        is_self_loop = "（自环）" if t.source == t.target else "（非自环）"
+        print(f"  {t} {is_self_loop}")
+    
+    test_positions = [
+        ((0, 0), "更接近 goal1"),
+        ((5, 5), "中间位置"),
+        ((9, 9), "更接近 goal2"),
+        ((2, 2), "在 goal1 上"),
+    ]
+    
+    print(f"\n边条件 Robustness:")
+    print("-" * 40)
+    
+    for pos, desc in test_positions:
+        shaper.reset()
+        state = np.array(pos)
+        rho = shaper.compute_edge_based_robustness(state)
+        
+        # F(goal1 | goal2) 的非自环边条件是 "goal1 | goal2"
+        # OR 取 max
+        rho1 = prop_manager.robustness('goal1', state)
+        rho2 = prop_manager.robustness('goal2', state)
+        expected = max(rho1, rho2)
+        
+        print(f"位置 {pos} ({desc}):")
+        print(f"  ρ(goal1)={rho1:.2f}, ρ(goal2)={rho2:.2f}")
+        print(f"  max={expected:.2f}, 实际={rho:.2f}")
+        
+        assert abs(rho - expected) < 0.1, f"OR 计算错误"
+    
+    print("\n✓ 测试通过!")
+
+
+def test_sequential_task():
+    """测试顺序任务 F(wp1 & F(wp2)) - AND 条件"""
+    print("\n" + "=" * 60)
+    print("测试 3: F(wp1 & F(wp2)) - 顺序任务")
+    print("=" * 60)
+    
+    prop_manager = AtomicPropositionManager()
+    prop_manager.register_auto_propositions()
+    
+    prop_manager.register_proposition('wp1', PositionProposition('wp1', (3, 3)))
+    prop_manager.register_proposition('wp2', PositionProposition('wp2', (7, 7)))
+    
+    env_info = {
+        'wall_positions': set(),
+        'goal_position': (9, 9),
+        'grid_size': (10, 10)
+    }
+    prop_manager.update_env_info(env_info)
+    
+    shaper = TaskRewardShaper("F(wp1 & F(wp2))", prop_manager)
+    
+    print(f"\n公式: F(wp1 & F(wp2))")
+    print(f"wp1: (3, 3), wp2: (7, 7)")
+    print(f"FSA 状态数: {shaper.fsa_monitor.fsa.num_states}")
+    print(f"FSA 转移边:")
+    for t in shaper.fsa_monitor.fsa.transitions:
+        is_self_loop = "（自环）" if t.source == t.target else "（非自环）"
+        print(f"  {t} {is_self_loop}")
+    
+    # 阶段 1：在初始状态，需要先到 wp1
+    print(f"\n阶段 1：初始状态，目标是 wp1")
+    print("-" * 40)
+    
+    shaper.reset()
+    initial_fsa_state = shaper.fsa_monitor.current_state
+    print(f"初始 FSA 状态: {initial_fsa_state}")
+    
+    # 找出初始状态的非自环边
+    edges = shaper.fsa_monitor.fsa.get_transitions_from(initial_fsa_state)
+    non_self_edges = [e for e in edges if e.source != e.target]
+    print(f"非自环边: {[str(e) for e in non_self_edges]}")
+    
+    test_pos = (1, 1)
+    state = np.array(test_pos)
+    rho = shaper.compute_edge_based_robustness(state)
+    print(f"位置 {test_pos}: rho={rho:.2f}")
+    
+    # 阶段 2：到达 wp1 后，FSA 状态改变
+    print(f"\n阶段 2：到达 wp1，FSA 状态改变")
+    print("-" * 40)
+    
+    state_wp1 = np.array([3, 3])
+    reward, info = shaper.compute_reward(state_wp1)
+    print(f"位置 (3, 3): FSA 状态 {initial_fsa_state} -> {info['fsa_state']}")
+    print(f"  r_progress={info['r_progress']:.2f}")
+    
+    if info['fsa_state'] != initial_fsa_state:
+        print("  *** FSA 状态改变! ***")
+        
+        # 现在目标是 wp2
+        new_edges = shaper.fsa_monitor.fsa.get_transitions_from(info['fsa_state'])
+        new_non_self_edges = [e for e in new_edges if e.source != e.target]
+        print(f"  新的非自环边: {[str(e) for e in new_non_self_edges]}")
+    
+    print("\n✓ 测试通过!")
+
+
+def test_until_formula():
+    """测试 Until 公式 (!danger) U safe - 排除通向陷阱的边"""
+    print("\n" + "=" * 60)
+    print("测试 4: (!danger) U safe - Until 公式")
+    print("=" * 60)
+    
+    prop_manager = AtomicPropositionManager()
+    prop_manager.register_auto_propositions()
+    
+    prop_manager.register_proposition('danger', RegionProposition('danger', [(3, 3), (3, 4), (4, 3)]))
+    prop_manager.register_proposition('safe', PositionProposition('safe', (7, 7)))
+    
+    env_info = {
+        'wall_positions': set(),
+        'goal_position': (9, 9),
+        'grid_size': (10, 10)
+    }
+    prop_manager.update_env_info(env_info)
+    
+    shaper = TaskRewardShaper("(!danger) U safe", prop_manager)
+    
+    print(f"\n公式: (!danger) U safe")
+    print(f"danger 区域: [(3,3), (3,4), (4,3)]")
+    print(f"safe 位置: (7, 7)")
+    print(f"FSA 状态数: {shaper.fsa_monitor.fsa.num_states}")
+    print(f"陷阱状态: {shaper.fsa_monitor.fsa.trap_states}")
+    print(f"FSA 转移边:")
+    for t in shaper.fsa_monitor.fsa.transitions:
+        is_self_loop = "（自环）" if t.source == t.target else ""
+        is_trap = "（→陷阱，排除）" if t.target in shaper.fsa_monitor.fsa.trap_states else ""
+        is_valid = "" if is_self_loop or is_trap else "（有效）"
+        print(f"  {t} {is_self_loop}{is_trap}{is_valid}")
+    
+    # 有效边只有: 1 --[safe]--> 0
+    # 所以 robustness 应该只基于 ρ(safe)
+    
+    test_cases = [
+        ((0, 0), "远离 danger 和 safe"),
+        ((5, 5), "接近 safe"),
+        ((7, 7), "在 safe 上"),
+        ((3, 3), "在 danger 上"),
+    ]
+    
+    print(f"\n边条件 Robustness（只考虑有效边 [safe]）:")
+    print("-" * 40)
+    
+    for pos, desc in test_cases:
+        shaper.reset()
+        state = np.array(pos)
+        rho = shaper.compute_edge_based_robustness(state)
+        
+        rho_safe = prop_manager.robustness('safe', state)
+        rho_danger = prop_manager.robustness('danger', state)
+        
+        print(f"位置 {pos} ({desc}):")
+        print(f"  ρ(safe)={rho_safe:.2f}, ρ(danger)={rho_danger:.2f}")
+        print(f"  边条件 rho={rho:.2f}, 期望={rho_safe:.2f}")
+        
+        # 有效边只有 [safe]，所以期望值就是 ρ(safe)
+        assert abs(rho - rho_safe) < 0.1, f"计算错误: {rho} != {rho_safe}"
+    
+    # 关键验证：在 danger 上时，robustness 应该是负的（引导远离）
+    shaper.reset()
+    state_danger = np.array([3, 3])
+    rho_on_danger = shaper.compute_edge_based_robustness(state_danger)
+    print(f"\n关键验证：在 danger 上时 rho={rho_on_danger:.2f}")
+    assert rho_on_danger < 0, "在 danger 上时 robustness 应该是负的"
+    
+    print("\n✓ 测试通过!")
+
+
+def test_progress_only_on_transition():
+    """测试进度奖励只在 FSA 状态改变时给"""
+    print("\n" + "=" * 60)
+    print("测试 5: 进度奖励只在 FSA 状态改变时给")
+    print("=" * 60)
+    
+    prop_manager = AtomicPropositionManager()
+    prop_manager.register_auto_propositions()
     
     env_info = {
         'wall_positions': set(),
         'goal_position': (5, 5),
-        'grid_size': (6, 6)
+        'grid_size': (10, 10)
     }
     prop_manager.update_env_info(env_info)
     
-    # 使用 G 算子：必须永远避开禁区
-    # 如果进入禁区，就违反了 G(!forbidden)，进入陷阱状态
-    task_formula = "F(goal) & G(!forbidden)"
-    shaper = TaskRewardShaper(task_formula, prop_manager)
-    
-    print(f"\n任务公式: {task_formula}")
-    print(f"Goal: (5, 5)")
-    print(f"Forbidden: (3, 3)")
-    print(f"陷阱状态: {shaper.fsa_monitor.fsa.trap_states if shaper.fsa_monitor.fsa else 'None'}")
-    
-    # 测试正常路径
-    print("\n测试正常路径（避开禁区）:")
-    print("-" * 40)
-    
+    shaper = TaskRewardShaper("F(goal)", prop_manager)
     shaper.reset()
     
-    state1 = np.array([0, 0])
-    reward1, info1 = shaper.compute_reward(state1, filtered=False)
-    print(f"位置 {tuple(state1)}: reward={reward1:.3f}, is_trap={info1['is_trap']}")
+    print(f"\n公式: F(goal)")
+    print(f"目标: (5, 5)")
     
-    state2 = np.array([1, 1])
-    reward2, info2 = shaper.compute_reward(state2, filtered=False)
-    print(f"位置 {tuple(state2)}: reward={reward2:.3f}, is_trap={info2['is_trap']}")
-    
-    # 测试进入禁区（陷阱）
-    print("\n测试进入禁区（陷阱状态）:")
+    # 在目标外移动（FSA 状态不变）
+    print(f"\n在目标外移动（FSA 状态不变）:")
     print("-" * 40)
     
-    shaper.reset()
+    positions = [(0, 0), (1, 1), (2, 2), (3, 3)]
     
-    # 先走几步
-    shaper.compute_reward(np.array([0, 0]), filtered=False)
-    shaper.compute_reward(np.array([1, 1]), filtered=False)
+    for pos in positions:
+        state = np.array(pos)
+        reward, info = shaper.compute_reward(state)
+        
+        print(f"位置 {pos}: r_progress={info['r_progress']:.2f}, FSA={info['fsa_state']}")
+        assert info['r_progress'] == 0.0, "FSA 状态不变时进度奖励应该为 0"
     
-    # 进入禁区
-    state_forbidden = np.array([3, 3])
-    reward_trap, info_trap = shaper.compute_reward(state_forbidden, filtered=False)
+    # 到达目标（FSA 状态改变）
+    print(f"\n到达目标（FSA 状态改变）:")
+    print("-" * 40)
     
-    print(f"位置 {tuple(state_forbidden)} (禁区): reward={reward_trap:.3f}")
-    print(f"  r_trap={info_trap['r_trap']:.3f}")
-    print(f"  r_progress={info_trap['r_progress']:.3f}")
-    print(f"  r_time={info_trap['r_time']:.3f}")
-    print(f"  is_trap={info_trap['is_trap']}")
-    print(f"  terminated={info_trap['terminated']}")
+    state = np.array([5, 5])
+    reward, info = shaper.compute_reward(state)
     
-    if info_trap['is_trap']:
-        assert info_trap['terminated'], "进入陷阱应该终止 episode"
-        assert info_trap['r_trap'] < 0, "进入陷阱应该有陷阱惩罚"
-        assert info_trap['r_progress'] == 0.0, "陷阱状态不应该有进度奖励"
-        # 验证其他奖励组件仍然被计算
-        assert 'r_time' in info_trap and info_trap['r_time'] != 0, "时间惩罚应该被计算"
-        print("  ✓ 陷阱状态处理正确，进度奖励为 0，其他组件正常计算")
-    else:
-        print("  注：此公式未产生陷阱状态（可能 Spot 构建方式不同）")
+    print(f"位置 (5, 5): r_progress={info['r_progress']:.2f}, FSA={info['fsa_state']}")
+    print(f"  is_accepting={info['is_accepting']}")
     
-    print("\n" + "=" * 60)
-    print("TaskRewardShaper 陷阱状态测试完成！")
-    print("=" * 60)
+    assert info['r_progress'] > 0, "到达目标时应该有进度奖励"
+    assert info['is_accepting'], "应该在接受状态"
+    
+    print("\n✓ 测试通过!")
 
 
-def test_reward_weights():
-    """测试自定义奖励权重"""
+def test_robustness_guides_toward_goal():
+    """测试 robustness 能正确引导 agent 朝目标前进"""
     print("\n" + "=" * 60)
-    print("测试自定义奖励权重")
+    print("测试 6: Robustness 引导方向")
     print("=" * 60)
     
-    # 创建命题管理器
     prop_manager = AtomicPropositionManager()
     prop_manager.register_auto_propositions()
     
     env_info = {
         'wall_positions': set(),
         'goal_position': (5, 5),
-        'grid_size': (6, 6)
+        'grid_size': (10, 10)
     }
     prop_manager.update_env_info(env_info)
     
-    # 自定义权重
-    custom_weights = {
-        'robustness': 0.5,   # 增大 robustness 权重
-        'progress': 2.0,     # 增大进度权重
-        'acceptance': 20.0,  # 增大完成奖励
-        'trap': 1.0,
-        'filter': 2.0,       # 增大过滤器惩罚
-        'time': 0.5          # 减小时间惩罚
-    }
+    shaper = TaskRewardShaper("F(goal)", prop_manager)
     
-    task_formula = "F(goal)"
-    shaper = TaskRewardShaper(task_formula, prop_manager, custom_weights)
+    print(f"\n公式: F(goal)")
+    print(f"目标: (5, 5)")
     
-    print(f"\n自定义权重: {custom_weights}")
+    # 沿着朝目标的路径，robustness 应该递增
+    path = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5)]
     
-    shaper.reset()
+    print(f"\n沿路径的 Robustness（应该递增）:")
+    print("-" * 40)
     
-    # 测试
-    state1 = np.array([0, 0])
-    reward1, info1 = shaper.compute_reward(state1, filtered=False)
+    prev_rho = float('-inf')
+    for pos in path:
+        shaper.reset()
+        state = np.array(pos)
+        rho = shaper.compute_edge_based_robustness(state)
+        
+        increasing = "↑" if rho > prev_rho else "✗"
+        print(f"位置 {pos}: rho={rho:.2f} {increasing}")
+        
+        assert rho > prev_rho, f"Robustness 应该递增: {prev_rho:.2f} -> {rho:.2f}"
+        prev_rho = rho
     
-    state2 = np.array([1, 1])
-    reward2, info2 = shaper.compute_reward(state2, filtered=False)
-    
-    print(f"\n位置 {tuple(state1)}: reward={reward1:.3f}")
-    print(f"位置 {tuple(state2)}: reward={reward2:.3f}")
-    print(f"  r_rho={info2['r_rho']:.3f} (权重 {custom_weights['robustness']})")
-    print(f"  r_time={info2['r_time']:.3f} (权重 {custom_weights['time']})")
-    
-    # 验证权重生效
-    assert shaper.weights == custom_weights, "权重应该被正确设置"
-    
-    print("\n" + "=" * 60)
-    print("自定义奖励权重测试通过！")
-    print("=" * 60)
+    print("\n✓ 测试通过!")
 
 
 if __name__ == '__main__':
-    test_task_reward_shaper_basic()
-    test_task_reward_shaper_progress()
-    test_task_reward_shaper_trap()
-    test_reward_weights()
+    test_simple_eventually()
+    test_multi_goal_or()
+    test_sequential_task()
+    test_until_formula()
+    test_progress_only_on_transition()
+    test_robustness_guides_toward_goal()
     
     print("\n" + "=" * 60)
     print("所有 TaskRewardShaper 测试通过！✓")

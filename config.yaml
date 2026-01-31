@@ -9,7 +9,7 @@
 # 环境设置
 environment:
   map_path: "maps/map4_large.txt"  # 地图文件（离散环境）
-  render: false         # 是否渲染画面（WSL 建议 false）
+  render: true         # 是否渲染画面
   view_size: 5          # 局部视野大小（奇数）
   random_goal: true     # 训练时随机采样目标
   random_start: true    # 训练时随机采样起点
@@ -61,12 +61,11 @@ reward:
   
   # 任务奖励塑形权重（来自 TaskRewardShaper）
   task_shaping_weights:
-    robustness: 0.1     # Robustness 增量奖励（稠密引导）
-    progress: 1.0       # FSA 进度奖励（稀疏里程碑）
-    acceptance: 10.0    # 任务完成奖励（最终目标）
-    trap: 1.0           # 陷阱状态惩罚（任务失败，-10.0）
-    filter: 1.0         # 过滤器惩罚（学习安全，-0.5）
-    time: 1.0           # 时间惩罚（鼓励效率，-0.01）
+    robustness: 0.5     # 边条件 Robustness（稠密引导，基于距离）
+    progress: 2.0       # FSA 进度奖励（稀疏里程碑）
+    acceptance: 15.0    # 任务完成奖励（最终目标）
+    trap: 0.5           # 陷阱状态惩罚（任务失败，-5.0）
+    filter: 0.5         # 过滤器惩罚（学习安全，-0.25）
 
 # 训练设置
 training:
@@ -88,4 +87,4 @@ testing:
 model:
   save_path: "models/"       # 模型保存路径
   auto_save: true            # 训练后自动保存
-  load_path: "/mnt/e/RL+形式化方法/models/ppo_safe"               # 加载已有模型路径（留空则创建新模型）/mnt/e/RL+形式化方法/models/ppo_safe
+  load_path: ""               # 加载已有模型路径（留空则创建新模型）/mnt/e/RL+形式化方法/models/ppo_safe

@@ -1,68 +1,101 @@
 # Safe RL Drone
 
-基于形式化方法的安全强化学习项目。使用 LTL (Linear Temporal Logic) 提供安全保证，结合 Goal-Conditioned RL 实现目标泛化。
+基于形式化方法的安全强化学习项目。采用**双规范架构**，将安全约束与任务目标分离：Safety 用形式化保证（硬约束），Task 交给 RL 学习（软目标）。
 
-## 核心设计
+## 核心架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Architecture v2.0                         │
-├─────────────────────────────────────────────────────────────┤
-│  Safety Layer (形式化保证，硬约束)                            │
-│  ├── Safety Specification: G(!wall) & G(!boundary)          │
-│  ├── SafetyFilter: 基于 FSA 的动作过滤                       │
-│  └── 零违规保证: 训练和测试全程安全                           │
-├─────────────────────────────────────────────────────────────┤
-│  Task Layer (RL 学习，软目标)                                │
-│  ├── Task Specification: F(goal)                            │
-│  ├── TaskRewardShaper: 6 个奖励组件                         │
-│  │   ├── Robustness 增量 (稠密引导)                         │
-│  │   ├── FSA 进度 (稀疏里程碑)                              │
-│  │   ├── 任务完成 (最终目标)                                │
-│  │   ├── 陷阱惩罚 (任务失败)                                │
-│  │   ├── 过滤器惩罚 (学习安全)                              │
-│  │   └── 时间惩罚 (鼓励效率)                                │
-│  └── Goal-Conditioned Policy: 泛化到任意目标                │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                    双规范架构 (Dual-Specification)                   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Safety Layer（形式化保证，硬约束）                           │   │
+│  │  ├── Safety Specification: G(!wall) & G(!boundary)          │   │
+│  │  ├── SafetyFilter: 基于 FSA 的动作过滤                       │   │
+│  │  │   └── 预测下一状态 → 检查是否进入陷阱 → 阻止不安全动作     │   │
+│  │  └── 保证：训练和测试全程零违规                              │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              ↓ 安全动作                             │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Task Layer（RL 学习，软目标）                                │   │
+│  │  ├── Task Specification: F(goal), F(wp1 & F(wp2)), etc.     │   │
+│  │  ├── TaskRewardShaper: 基于 FSA + Robustness 的奖励塑形      │   │
+│  │  │   ├── 边条件 Robustness（稠密引导）                       │   │
+│  │  │   ├── FSA 进度奖励（稀疏里程碑）                          │   │
+│  │  │   ├── 任务完成奖励                                        │   │
+│  │  │   ├── 任务陷阱惩罚（任务失败，终止 episode）              │   │
+│  │  │   └── 过滤器惩罚（学习避免触发安全过滤）                  │   │
+│  │  └── 任务陷阱：给惩罚并终止，不是硬约束                      │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-核心原则：
-- **双规范架构** - Safety 用形式化保证（硬约束），Task 交给 RL 学习（软目标）
-- **Safety ≠ Reward** - 安全不进 RL 的 reward，用 SafetyFilter 硬保证
-- **Task = LTL + Reward Shaping** - 任务用 LTL 定义，用 Robustness + FSA 引导学习
-- **Goal = Parameter** - 目标是策略的参数，不是固定的
+### 设计原则
+
+| 原则 | 说明 |
+|------|------|
+| **Safety ≠ Reward** | 安全不进 RL 的 reward，用 SafetyFilter 硬保证 |
+| **G 算子 → 硬约束** | `G(!wall)` 这类"永远不"的约束用 SafetyFilter 强制执行 |
+| **F/U 算子 → 软引导** | `F(goal)` 这类"最终要"的目标用 Robustness 引导 RL 学习 |
+| **两种陷阱** | Safety 陷阱被阻止（永不进入），Task 陷阱给惩罚（任务失败） |
+
+## 边条件 Robustness
+
+参考 [Xiao Li et al., Science Robotics 2019](https://www.science.org/doi/10.1126/scirobotics.aay6276)，使用 FSA 转移边的条件计算 robustness，提供稠密的引导信号。
+
+### 计算方法
+
+对于当前 FSA 状态的每条**有效出边**（非自环、不通向陷阱），计算其条件的 robustness：
+
+```
+ρ(a & b) = min(ρ(a), ρ(b))    # AND 取 min
+ρ(a | b) = max(ρ(a), ρ(b))    # OR 取 max
+ρ(!a)    = -ρ(a)              # NOT 取负
+ρ(goal)  = 1 - distance(agent, goal)  # 原子命题：基于距离
+```
+
+最终取所有有效边的 max 作为当前状态的 robustness。
+
+### 有效边的定义
+
+1. **非自环**：`source != target`（能推进 FSA 状态）
+2. **不通向陷阱**：`target ∉ trap_states`（不会导致任务失败）
+
+这避免了两个问题：
+- 自环边（如 `!goal`）会在远离目标时给出正的 robustness
+- 通向陷阱的边会错误引导 agent 进入失败状态
 
 ## 项目结构
 
 ```
 safe_rl_drone/
-├── env.py                 # GridWorld 环境 (支持 random_goal/random_start)
-├── ltl/                   # LTL 形式化方法模块
-│   ├── propositions.py    # 原子命题管理
-│   ├── parser.py          # LTL 公式解析（使用 Spot）
-│   ├── robustness.py      # Robustness 递归计算
-│   └── fsa.py             # FSA 监控自动机
-├── safety/                # 安全层模块
-│   ├── action_filter.py   # SafetyFilter (基于 Safety FSA)
-│   ├── task_reward_shaper.py  # TaskRewardShaper (基于 Task FSA)
-│   └── monitor.py         # [已弃用] 旧的安全监控器
-└── wrappers/              # 环境包装器
-    └── safe_env_wrapper.py
+├── env.py                     # GridWorld 环境
+├── ltl/                       # LTL 形式化方法模块
+│   ├── fsa.py                 # FSA 监控自动机（Spot 库）
+│   │   ├── FSAMonitor         # 运行时监控
+│   │   ├── _can_reach_accepting()  # BFS 陷阱检测
+│   │   └── compute_condition_robustness()  # 边条件 robustness
+│   ├── parser.py              # LTL 公式解析
+│   ├── propositions.py        # 原子命题管理
+│   └── robustness.py          # Robustness 计算器
+├── safety/                    # 安全层模块
+│   ├── action_filter.py       # SafetyFilter（基于 Safety FSA）
+│   └── task_reward_shaper.py  # TaskRewardShaper（基于 Task FSA）
+└── wrappers/
+    └── safe_env_wrapper.py    # 集成包装器
 
-tests/                     # 测试文件
-├── test_ltl_modules.py    # LTL 模块测试
-├── test_safety_filter.py  # SafetyFilter 测试
-├── test_task_reward_shaper.py  # TaskRewardShaper 测试
-├── test_safe_wrapper.py   # 安全包装器测试
-└── test_goal_conditioned.py # Goal-Conditioned 测试
+tests/                         # 测试文件
+├── test_safety_filter.py      # SafetyFilter 测试
+├── test_task_reward_shaper.py # TaskRewardShaper 测试
+└── ...
 
-maps/                      # 地图文件
-├── map1.txt               # 6×6 简单地图
-├── map2_medium.txt        # 10×10 中等地图
-└── map4_large.txt         # 20×20 大地图
-
-models/                    # 训练好的模型
-└── ppo_safe.zip           # Goal-Conditioned 安全策略
+maps/                          # 地图文件
+config.yaml                    # 默认配置
+config_sequential.yaml         # 顺序任务配置
+config_multi_goal.yaml         # 多目标配置
+config_until.yaml              # Until 公式配置
 ```
 
 ## 安装
@@ -73,7 +106,7 @@ models/                    # 训练好的模型
 pip install -r requirements.txt
 ```
 
-### Spot 库（LTL 解析）
+### Spot 库（LTL → FSA 转换）
 
 ```bash
 # Ubuntu/WSL
@@ -92,24 +125,19 @@ sudo make install
 # 设置环境变量（WSL）
 export PYTHONPATH=/usr/local/lib/python3.12/site-packages:$PYTHONPATH
 
-# 训练 + 测试
+# 训练简单任务 F(goal)
 python3 main.py
 
-# 跳过训练，直接测试已有模型
+# 训练顺序任务 F(wp1 & F(wp2 & F(goal)))
+python3 main.py --config config_sequential.yaml
+
+# 跳过训练，测试已有模型
 python3 main.py --skip-train --load models/ppo_safe
 ```
 
 ## 配置说明
 
-编辑 `config.yaml`：
-
 ```yaml
-environment:
-  map_path: "maps/map4_large.txt"
-  view_size: 5           # 局部视野大小
-  random_goal: true      # 训练时随机目标
-  random_start: true     # 训练时随机起点
-
 # 双规范配置
 specifications:
   # 安全规范（硬约束）
@@ -120,57 +148,35 @@ specifications:
   # 任务规范（软引导）
   task:
     enabled: true
-    formula: "F(goal)"
+    formula: "F(goal)"  # 或 "F(wp1 & F(wp2 & F(goal)))"
 
 # 奖励权重
 reward:
   task_shaping_weights:
-    robustness: 0.1     # Robustness 增量
-    progress: 1.0       # FSA 进度
-    acceptance: 10.0    # 任务完成
-    trap: 1.0           # 陷阱惩罚
-    filter: 1.0         # 过滤器惩罚
-    time: 1.0           # 时间惩罚
-
-training:
-  total_timesteps: 500000
+    robustness: 0.5     # 边条件 Robustness（稠密）
+    progress: 2.0       # FSA 进度（稀疏）
+    acceptance: 15.0    # 任务完成
+    trap: 0.5           # 任务陷阱惩罚（-5.0）
+    filter: 0.5         # 过滤器惩罚（-0.25）
 ```
-
-## 实验结果
-
-在 10×10 地图上训练 100000 步：
-
-| 指标 | 结果 |
-|------|------|
-| 训练撞墙次数 | 0 |
-| 训练越界次数 | 0 |
-| 安全干预率 | 4.62% |
-| 测试成功率 | 100% (5/5) |
-| 测试安全违规 | 0 |
-
-验证了两个核心能力：
-1. **目标泛化** - 随机起点/目标都能到达
-2. **安全保证** - 全程零违规
 
 ## LTL 公式语法
 
-| 算子 | 含义 | 示例 |
+| 算子 | 含义 | 用途 |
 |------|------|------|
-| `G(φ)` | 全局 (Always) | `G(!wall)` 永不撞墙 |
-| `F(φ)` | 最终 (Eventually) | `F(goal)` 最终到达目标 |
-| `X(φ)` | 下一步 (Next) | `X(safe)` 下一步安全 |
-| `φ U ψ` | 直到 (Until) | `safe U goal` |
-| `!`, `&`, `\|` | 非、与、或 | `!wall & !boundary` |
+| `G(φ)` | 全局 (Always) | Safety 规范：`G(!wall)` |
+| `F(φ)` | 最终 (Eventually) | Task 规范：`F(goal)` |
+| `φ U ψ` | 直到 (Until) | Task 规范：`(!danger) U safe` |
+| `!`, `&`, `\|` | 非、与、或 | 组合条件 |
 
-## 命令行参数
+### 任务示例
 
-```bash
-python3 main.py --safe true/false    # 开启/关闭安全层
-python3 main.py --ltl "G(!wall)"     # 指定 LTL 公式
-python3 main.py --timesteps 50000    # 训练步数
-python3 main.py --skip-train         # 跳过训练
-python3 main.py --load models/xxx    # 加载模型
-```
+| 任务 | 公式 |
+|------|------|
+| 到达目标 | `F(goal)` |
+| 多目标选择 | `F(goal1 \| goal2 \| goal3)` |
+| 顺序访问 | `F(wp1 & F(wp2 & F(goal)))` |
+| 避开危险直到安全 | `(!danger) U safe` |
 
 ## 运行测试
 
@@ -178,23 +184,9 @@ python3 main.py --load models/xxx    # 加载模型
 python3 -m pytest tests/ -v
 ```
 
-## 后续计划
+## 已知问题
 
-**Phase 1: 双规范架构** (当前进度)
-- [x] Step 1.1: 双规范配置系统
-- [x] Step 1.2: SafetyFilter 类（基于 Safety FSA）
-- [x] Step 1.3: TaskRewardShaper 类（基于 Task FSA + Robustness）
-- [ ] Step 1.4: 集成到 SafeEnvWrapper
-- [ ] Step 1.5: 测试双规范架构
-
-**Phase 2: 连续环境迁移**
-- [ ] PyBullet 2D 导航环境
-- [ ] 连续动作空间适配
-- [ ] 几何安全过滤器（CBF）
-
-**Phase 3: 动态环境**
-- [ ] 动态障碍物
-- [ ] 在线规范更新
+见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
 
 ## 参考文献
 

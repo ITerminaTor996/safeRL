@@ -45,56 +45,83 @@ def merge_args_to_config(config: dict, args) -> dict:
 
 
 class SafetyStatsCallback(BaseCallback):
-    """统计训练过程中的安全数据"""
+    """统计训练过程中的安全和任务数据"""
     
     def __init__(self, verbose=0):
         super().__init__(verbose)
         self.total_interventions = 0
         self.total_collisions = 0
         self.total_boundary = 0
+        self.task_completions = 0
+        self.task_traps = 0
         self.total_steps = 0
+        self.total_reward = 0.0
         
     def _on_step(self) -> bool:
         self.total_steps += 1
         infos = self.locals.get('infos', [])
+        rewards = self.locals.get('rewards', [])
+        
+        for reward in rewards:
+            self.total_reward += reward
+        
         for info in infos:
-            if info.get('safety_intervention', False):
+            if info.get('safety_filtered', False):
                 self.total_interventions += 1
             if info.get('collision', False):
                 self.total_collisions += 1
             if info.get('boundary', False):
                 self.total_boundary += 1
+            if info.get('task_is_accepting', False):
+                self.task_completions += 1
+            if info.get('task_is_trap', False):
+                self.task_traps += 1
         return True
     
     def get_stats(self) -> dict:
         intervention_rate = self.total_interventions / max(self.total_steps, 1)
+        avg_reward = self.total_reward / max(self.total_steps, 1)
         return {
             'interventions': self.total_interventions,
             'collisions': self.total_collisions,
             'boundary': self.total_boundary,
+            'task_completions': self.task_completions,
+            'task_traps': self.task_traps,
             'total_steps': self.total_steps,
-            'intervention_rate': intervention_rate
+            'intervention_rate': intervention_rate,
+            'avg_reward': avg_reward
         }
 
 
 def print_banner(config: dict):
     """打印启动信息"""
     print(f"\n{'='*60}")
-    print("Safe RL Drone - 形式化方法 + 强化学习")
-    print("Goal-Conditioned RL: Reach Skill with Safety Guarantee")
+    print("Safe RL Drone - 双规范架构 v3.0")
+    print("Safety Specification + Task Specification")
     print(f"{'='*60}")
     print(f"地图: {config['environment']['map_path']}")
-    print(f"安全保护: {'✓ 开启' if config['safety']['enabled'] else '✗ 关闭'}")
-    if config['safety']['enabled']:
-        print(f"LTL 安全公式: {config['safety']['formula']}")
+    
+    # 安全规范
+    safety_enabled = config['specifications']['safety'].get('enabled', True)
+    print(f"安全规范: {'✓ 开启' if safety_enabled else '✗ 关闭'}")
+    if safety_enabled:
+        print(f"  公式: {config['specifications']['safety']['formula']}")
+    
+    # 任务规范
+    task_enabled = config['specifications']['task'].get('enabled', True)
+    print(f"任务规范: {'✓ 开启' if task_enabled else '✗ 关闭'}")
+    if task_enabled:
+        print(f"  公式: {config['specifications']['task']['formula']}")
+    
     print(f"随机目标: {'✓' if config['environment'].get('random_goal', False) else '✗'}")
     print(f"随机起点: {'✓' if config['environment'].get('random_start', False) else '✗'}")
+    
     dynamic = config['environment'].get('dynamic_obstacles', False)
     print(f"动态障碍物: {'✓ 开启' if dynamic else '✗ 关闭'}")
     if dynamic:
         prob = config['environment'].get('obstacle_change_prob', 0.02)
         print(f"  变化概率: {prob}")
-    print(f"Robustness 奖励: {'✓' if config['task'].get('use_robustness_reward', False) else '✗'}")
+    
     print(f"训练: {'✓ 启用' if config['training']['enabled'] else '✗ 跳过'}")
     print(f"{'='*60}\n")
 
@@ -153,15 +180,25 @@ def main():
     if dynamic_obstacles:
         print(f"  动态障碍物: ✓ 开启 (变化概率: {obstacle_change_prob})")
     
-    if config['safety']['enabled']:
-        # 使用新的安全包装器
+    # 使用新的双规范架构
+    safety_enabled = config['specifications']['safety'].get('enabled', True)
+    task_enabled = config['specifications']['task'].get('enabled', True)
+    
+    if safety_enabled or task_enabled:
+        safety_formula = config['specifications']['safety']['formula']
+        task_formula = config['specifications']['task']['formula']
+        
+        # 准备配置
+        wrapper_config = {
+            'propositions': config.get('propositions', {}),
+            'reward_weights': config['reward'].get('task_shaping_weights', {})
+        }
+        
         env = SafeEnvWrapper(
             base_env,
-            safety_formula=config['safety']['formula'],
-            unsafe_penalty=config['safety'].get('unsafe_penalty', -1.0),
-            use_robustness_reward=config['task'].get('use_robustness_reward', False),
-            robustness_weight=config['task'].get('robustness_weight', 0.1),
-            config=config
+            safety_formula=safety_formula,
+            task_formula=task_formula,
+            config=wrapper_config
         )
     else:
         env = base_env
@@ -207,20 +244,24 @@ def main():
         if callback:
             stats = callback.get_stats()
             print(f"\n{'='*60}")
-            print("训练安全统计")
+            print("训练统计")
             print(f"{'='*60}")
             print(f"总步数: {stats['total_steps']}")
-            print(f"撞墙次数: {stats['collisions']}")
-            print(f"越界次数: {stats['boundary']}")
-            if config['safety']['enabled']:
-                print(f"安全干预次数: {stats['interventions']}")
-                print(f"干预率: {stats['intervention_rate']:.2%}")
+            print(f"平均奖励: {stats['avg_reward']:.3f}")
+            print(f"\n安全统计:")
+            print(f"  撞墙次数: {stats['collisions']}")
+            print(f"  越界次数: {stats['boundary']}")
+            print(f"  安全干预次数: {stats['interventions']}")
+            print(f"  干预率: {stats['intervention_rate']:.2%}")
+            print(f"\n任务统计:")
+            print(f"  任务完成次数: {stats['task_completions']}")
+            print(f"  任务陷阱次数: {stats['task_traps']}")
             print(f"{'='*60}")
         
         # 保存模型
         if config['model']['auto_save']:
             os.makedirs(config['model']['save_path'], exist_ok=True)
-            model_name = "ppo_safe" if config['safety']['enabled'] else "ppo_unsafe"
+            model_name = "ppo_dual_spec"
             model_path = os.path.join(config['model']['save_path'], model_name)
             model.save(model_path)
             print(f"模型已保存: {model_path}.zip")
@@ -236,6 +277,8 @@ def main():
     test_interventions = 0
     test_collisions = 0
     test_boundary = 0
+    test_task_completions = 0
+    test_task_traps = 0
     total_robustness = 0.0
     max_steps = config['environment'].get('max_episode_steps', 500)
     successes = 0
@@ -266,14 +309,18 @@ def main():
             obs, reward, terminated, truncated, info = env.step(action.item())
             steps += 1
             
-            if info.get('safety_intervention', False):
+            if info.get('safety_filtered', False):
                 test_interventions += 1
             if info.get('collision', False):
                 test_collisions += 1
             if info.get('boundary', False):
                 test_boundary += 1
+            if info.get('task_is_accepting', False):
+                test_task_completions += 1
+            if info.get('task_is_trap', False):
+                test_task_traps += 1
             
-            episode_robustness.append(info.get('robustness', 0.0))
+            episode_robustness.append(info.get('task_rho', 0.0))
             
             if config['environment']['render']:
                 env.render()
@@ -296,11 +343,14 @@ def main():
     print("测试结果（目标泛化性验证）")
     print(f"{'='*60}")
     print(f"成功率: {successes}/{config['testing']['episodes']} ({success_rate:.1f}%)")
-    if config['safety']['enabled']:
-        print(f"安全干预次数: {test_interventions}")
-    print(f"撞墙次数: {test_collisions}")
-    print(f"越界次数: {test_boundary}")
-    print(f"平均 Robustness: {total_robustness / config['testing']['episodes']:.2f}")
+    print(f"\n安全统计:")
+    print(f"  安全干预次数: {test_interventions}")
+    print(f"  撞墙次数: {test_collisions}")
+    print(f"  越界次数: {test_boundary}")
+    print(f"\n任务统计:")
+    print(f"  任务完成次数: {test_task_completions}")
+    print(f"  任务陷阱次数: {test_task_traps}")
+    print(f"  平均 Robustness: {total_robustness / config['testing']['episodes']:.2f}")
     print(f"{'='*60}")
     
     env.close()

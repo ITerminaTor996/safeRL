@@ -194,7 +194,6 @@ class SafeEnvWrapper(gym.Wrapper):
             'r_accept': task_info['r_accept'],
             'r_trap': task_info.get('r_trap', 0.0),
             'r_filter': task_info['r_filter'],
-            'r_time': task_info['r_time'],
             'original_action': action,
             'executed_action': safe_action
         })

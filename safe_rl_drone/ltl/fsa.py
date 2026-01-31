@@ -336,6 +336,69 @@ class FSAMonitor:
         except:
             return True  # 未知命题默认为真
     
+    def compute_condition_robustness(self, expr: str, state: np.ndarray) -> float:
+        """
+        计算布尔表达式的 robustness
+        
+        参考：Xiao Li et al., Science Robotics 2019
+        
+        语义：
+        - AND (a & b): min(ρ(a), ρ(b))
+        - OR (a | b): max(ρ(a), ρ(b))
+        - NOT (!a): -ρ(a)
+        - 原子命题: prop_manager.robustness(name, state)
+        
+        Args:
+            expr: 布尔表达式字符串
+            state: 环境状态
+            
+        Returns:
+            robustness 值
+        """
+        expr = expr.strip()
+        
+        # 处理常量
+        if expr == '1' or expr.lower() == 'true':
+            return 100.0  # 大正数
+        if expr == '0' or expr.lower() == 'false':
+            return -100.0  # 大负数
+        
+        # 去除最外层括号（如果有）
+        if expr.startswith('(') and expr.endswith(')'):
+            if self._is_outer_parens(expr):
+                return self.compute_condition_robustness(expr[1:-1], state)
+        
+        # 处理或（最低优先级）：取 max
+        or_pos = self._find_operator_outside_parens(expr, '|')
+        if or_pos != -1:
+            left = expr[:or_pos].strip()
+            right = expr[or_pos+1:].strip()
+            return max(
+                self.compute_condition_robustness(left, state),
+                self.compute_condition_robustness(right, state)
+            )
+        
+        # 处理与（中等优先级）：取 min
+        and_pos = self._find_operator_outside_parens(expr, '&')
+        if and_pos != -1:
+            left = expr[:and_pos].strip()
+            right = expr[and_pos+1:].strip()
+            return min(
+                self.compute_condition_robustness(left, state),
+                self.compute_condition_robustness(right, state)
+            )
+        
+        # 处理否定（最高优先级）：取负
+        if expr.startswith('!'):
+            inner = expr[1:].strip()
+            return -self.compute_condition_robustness(inner, state)
+        
+        # 原子命题
+        try:
+            return self._prop_manager.robustness(expr, state)
+        except:
+            return 0.0  # 未知命题默认为 0
+    
     def _is_outer_parens(self, expr: str) -> bool:
         """
         检查表达式最外层的括号是否匹配

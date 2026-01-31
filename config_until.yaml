@@ -1,0 +1,76 @@
+# Safe RL Drone 配置文件 - Until 任务测试
+# ============================================================
+# 任务：避开禁区直到到达安全区
+# ============================================================
+
+# 环境设置
+environment:
+  map_path: "maps/map4_large.txt"
+  render: false
+  view_size: 5
+  random_goal: false
+  random_start: true
+  max_episode_steps: 1500
+  dynamic_obstacles: false
+
+# 原子命题定义
+propositions:
+  wall: "auto"
+  goal: "auto"
+  boundary: "auto"
+  
+  # 简化：只定义一个必须到达的安全区
+  safe_zone:
+    type: "position"
+    pos: [15, 15]  # 地图右下角
+
+# 规范定义
+specifications:
+  # 安全规范
+  safety:
+    enabled: true
+    formula: "G(!wall) & G(!boundary)"
+    
+  # 任务规范（简化版 Until）
+  task:
+    enabled: true
+    # 简化：直接到达 safe_zone（相当于 F(safe_zone)）
+    # 如果要测试 Until，可以改为：(!wall) U safe_zone
+    formula: "F(safe_zone)"
+    
+    # 解释：
+    # F(safe_zone) = 最终到达安全区
+    # 这个任务和基本的 F(goal) 类似，但目标点是自定义的
+
+# 奖励设计
+reward:
+  goal_reached: 10.0
+  step_penalty: -0.05
+  safety_violation: -1.0
+  
+  task_shaping_weights:
+    robustness: 0.5     # 边条件 Robustness（稠密引导）
+    progress: 2.0       # FSA 进度奖励
+    acceptance: 15.0    # 完成奖励
+    trap: 0.5           # 陷阱惩罚（任务失败不是灾难）
+    filter: 0.5
+
+# 训练设置
+training:
+  enabled: true
+  algorithm: "PPO"
+  total_timesteps: 500000  # 简化任务，减少训练步数
+  device: "cpu"
+  verbose: 1
+
+# 测试设置
+testing:
+  episodes: 3
+  deterministic: true
+  test_goals: []
+
+# 模型设置
+model:
+  save_path: "models/"
+  auto_save: true
+  load_path: ""

@@ -1,0 +1,82 @@
+# Safe RL Drone 配置文件 - 顺序任务测试
+# ============================================================
+# 任务：必须按顺序访问 wp1 → wp2 → goal
+# ============================================================
+
+# 环境设置
+environment:
+  map_path: "maps/map4_large.txt"
+  render: true
+  view_size: 5
+  random_goal: false      # 固定目标，便于测试
+  random_start: true      # 随机起点
+  max_episode_steps: 2000  # 顺序任务需要更多步数
+  dynamic_obstacles: false # 先关闭动态障碍物，简化测试
+
+# 原子命题定义
+propositions:
+  wall: "auto"
+  goal: "auto"
+  boundary: "auto"
+  
+  # 定义两个 waypoint（距离更近，更容易学习）
+  wp1:
+    type: "position"
+    pos: [3, 3]    # 第一个 waypoint（左上）
+  wp2:
+    type: "position"
+    pos: [8, 8]    # 第二个 waypoint（中间）
+
+# 规范定义
+specifications:
+  # 安全规范（不变）
+  safety:
+    enabled: true
+    formula: "G(!wall) & G(!boundary)"
+    
+  # 任务规范（顺序任务）
+  task:
+    enabled: true
+    # 方式 1：使用 Until 算子
+    # formula: "(!goal) U (wp1 & ((!goal) U (wp2 & F(goal))))"
+    
+    # 方式 2：更简洁的表达（推荐）
+    formula: "F(wp1 & F(wp2 & F(goal)))"
+    
+    # 解释：
+    # F(wp1 & F(wp2 & F(goal)))
+    # = 最终到达 wp1，并且之后最终到达 wp2，并且之后最终到达 goal
+    # = 顺序访问 wp1 → wp2 → goal
+
+# 奖励设计
+reward:
+  goal_reached: 10.0
+  step_penalty: -0.05
+  safety_violation: -1.0
+  
+  task_shaping_weights:
+    robustness: 0.5     # 边条件 Robustness（稠密引导）
+    progress: 3.0       # 顺序任务更依赖 FSA 进度
+    acceptance: 20.0    # 任务更难，完成奖励更高
+    trap: 0.5           # 陷阱惩罚（任务失败不是灾难）
+    filter: 0.5
+
+# 训练设置
+training:
+  enabled: true
+  algorithm: "PPO"
+  total_timesteps: 500000  # 减少训练步数
+  device: "cpu"
+  verbose: 1
+
+# 测试设置
+testing:
+  episodes: 3
+  deterministic: true
+  test_goals: []
+
+# 模型设置
+model:
+  save_path: "models/"
+  auto_save: true
+  load_path: ""

@@ -1,0 +1,82 @@
+# Safe RL Drone 配置文件 - 多目标选择任务
+# ============================================================
+# 任务：到达 goal1、goal2 或 goal3 中的任意一个
+# ============================================================
+
+# 环境设置
+environment:
+  map_path: "maps/map4_large.txt"
+  render: false
+  view_size: 5
+  random_goal: false
+  random_start: true
+  max_episode_steps: 1000
+  dynamic_obstacles: false
+
+# 原子命题定义
+propositions:
+  wall: "auto"
+  goal: "auto"
+  boundary: "auto"
+  
+  # 定义三个可选目标（分布在地图不同位置）
+  goal1:
+    type: "position"
+    pos: [3, 15]   # 左下
+  goal2:
+    type: "position"
+    pos: [10, 10]  # 中间
+  goal3:
+    type: "position"
+    pos: [15, 3]   # 右上
+
+# 规范定义
+specifications:
+  # 安全规范
+  safety:
+    enabled: true
+    formula: "G(!wall) & G(!boundary)"
+    
+  # 任务规范（多目标选择）
+  task:
+    enabled: true
+    # 到达任意一个目标即可
+    formula: "F(goal1 | goal2 | goal3)"
+    
+    # 解释：
+    # F(goal1 | goal2 | goal3)
+    # = 最终到达 goal1 或 goal2 或 goal3
+    # = agent 会选择最近的目标
+
+# 奖励设计
+reward:
+  goal_reached: 10.0
+  step_penalty: -0.05
+  safety_violation: -1.0
+  
+  task_shaping_weights:
+    robustness: 0.5     # 边条件 Robustness（稠密引导）
+    progress: 2.0       # FSA 进度奖励
+    acceptance: 15.0    # 任务完成奖励
+    trap: 0.5           # 陷阱惩罚
+    filter: 0.5
+
+# 训练设置
+training:
+  enabled: true
+  algorithm: "PPO"
+  total_timesteps: 500000
+  device: "cpu"
+  verbose: 1
+
+# 测试设置
+testing:
+  episodes: 5
+  deterministic: true
+  test_goals: []
+
+# 模型设置
+model:
+  save_path: "models/"
+  auto_save: true
+  load_path: ""
